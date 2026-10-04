@@ -63,6 +63,58 @@ test('host integration: stream wrapper is scoped, unwraps before display, and pr
     assert.deepEqual(ctx.chat[0].extra.structuredPrefillClean, { validated: true });
 });
 
+test('host integration: native RP streams ordinary prose and never requests a JSON envelope', async () => {
+    enabled({ outputMode: 'native' }); ctx.chat = []; const p = processor();
+    await emit(events.GENERATION_STARTED, 'normal', {}, false);
+    const request = { ...data(true), chat_completion_source: 'moonshot', model: 'kimi-k2.5' };
+    await emit(events.CHAT_COMPLETION_SETTINGS_READY, request);
+    assert.equal(request.json_schema, undefined);
+    assert.deepEqual(request.messages.at(-1), { role: 'assistant', content: 'private\nAda: ', partial: true });
+    assert.equal(request.messages.some(message => /Return only a JSON/.test(message.content)), false);
+    const state = { reasoning: 'Provider-owned thinking' };
+    p.generator = async function* () { yield { text: 'Hello', state }; yield { text: 'Hello there.', state }; };
+    await p.onStartStreaming('...');
+    for await (const chunk of p.generator()) { ctx.chat[0].mes = chunk.text; assert.equal(chunk.state, state); }
+    await emit(events.MESSAGE_RECEIVED, 0);
+    assert.equal(ctx.chat[0].mes, 'Ada: Hello there.');
+    assert.deepEqual(ctx.chat[0].extra.structuredPrefillClean, { validated: false, mode: 'native', completed: true, prefixEnforced: 'unverified' });
+    await emit(events.GENERATION_ENDED);
+    enabled({ outputMode: 'native' }); ctx.chat = []; ctx.streamingProcessor = null;
+    await emit(events.GENERATION_STARTED, 'normal', {}, false);
+    await emit(events.CHAT_COMPLETION_SETTINGS_READY, { ...data(), chat_completion_source: 'moonshot' });
+    ctx.chat.push({ mes: 'ordinary prose', is_user: false });
+    await emit(events.MESSAGE_RECEIVED, 0);
+    assert.equal(ctx.chat[0].mes, 'Ada: ordinary prose');
+    await emit(events.GENERATION_ENDED);
+
+    const base = 'Ada: The door opened.';
+    ctx.chat = [{ mes: base, is_user: false, extra: {}, swipes: [base], swipe_id: 0 }];
+    const continuation = processor('continue', base + ' ');
+    await emit(events.GENERATION_STARTED, 'continue', {}, false);
+    const next = { ...data(true), chat_completion_source: 'moonshot', type: 'continue' };
+    await emit(events.CHAT_COMPLETION_SETTINGS_READY, next);
+    assert.equal(next.json_schema, undefined);
+    assert.equal(next.messages.at(-1).content, 'private\nAda: ' + base);
+    assert.equal(continuation.continueMessage, base);
+    continuation.generator = async function* () { yield { text: ' A bell rang.', state }; };
+    await continuation.onStartStreaming('...');
+    for await (const chunk of continuation.generator()) ctx.chat[0].mes = continuation.continueMessage + chunk.text;
+    await emit(events.MESSAGE_RECEIVED, 0);
+    assert.equal(ctx.chat[0].mes, base + ' A bell rang.');
+    assert.equal(ctx.chat[0].extra.structuredPrefillClean.mode, 'native');
+    await emit(events.GENERATION_ENDED);
+
+    ctx.chat = [{ mes: base, is_user: false, extra: {}, swipes: [base], swipe_id: 0 }];
+    ctx.streamingProcessor = null;
+    await emit(events.GENERATION_STARTED, 'continue', {}, false);
+    await emit(events.CHAT_COMPLETION_SETTINGS_READY, { ...data(), chat_completion_source: 'moonshot', type: 'continue' });
+    ctx.chat[0].mes = base + ' A bell rang.';
+    await emit(events.MESSAGE_RECEIVED, 0);
+    assert.equal(ctx.chat[0].mes, base + ' A bell rang.');
+    assert.equal(ctx.chat[0].swipes[0], base + ' A bell rang.');
+    await emit(events.GENERATION_ENDED);
+});
+
 test('host integration: non-stream reply and active swipe are both unwrapped', async () => {
     enabled(); ctx.chat = []; ctx.streamingProcessor = null;
     await emit(events.GENERATION_STARTED, 'normal', {}, false);

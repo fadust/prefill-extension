@@ -113,6 +113,7 @@ function finish(raw, request) {
     if (!raw.trim()) throw new Error(request.lastState?.reasoning
         ? 'Provider returned reasoning but no final answer. Increase the response token budget or use a non-thinking model, then regenerate or Continue with local override.'
         : 'Provider returned no final answer. Check the response token budget, then regenerate or Continue with local override.');
+    if (request.mode === 'native') { request.compiled.validate(raw); return request.compiled.display(raw, true); }
     const value = readEnvelope(raw);
     request.compiled.validate(value);
     return request.compiled.display(value);
@@ -144,7 +145,7 @@ function attachStream(processor, request) {
                     request.raw = raw;
                     let text = '';
                     let decoded = '';
-                    try { decoded = decoder.push(raw); text = renderPartialValue(decoded, request.compiled); }
+                    try { decoded = request.mode === 'native' ? raw : decoder.push(raw); text = request.mode === 'native' ? request.compiled.display(raw) : renderPartialValue(decoded, request.compiled); }
                     catch { /* Wait for full JSON; an incomplete response is preserved below. */ }
                     const issue = guard.check(raw.length, decoded);
                     if (issue) {
@@ -157,13 +158,13 @@ function attachStream(processor, request) {
                 }
                 const text = finish(raw, request);
                 request.complete = true;
-                status('Applied: JSON reply validated and unwrapped.');
+                status(request.mode === 'native' ? 'RP reply completed. Local checks passed; native prefix consumption cannot be verified by the client.' : 'Applied: JSON reply validated and unwrapped.');
                 yield { text, swipes: [], toolCalls: [], state: request.lastState };
             } catch (error) {
                 request.error = error.message;
                 status(`Reply needs review: ${error.message} Raw reply is stored in message extra.structuredPrefillClean.raw.`);
                 // Keep a refusal/plain reply visible; never erase it for failing the schema.
-                const text = raw.trimStart().startsWith('{') ? renderPartialSafely(raw, request) : raw;
+                const text = request.mode === 'native' ? request.compiled.display(raw, true) : raw.trimStart().startsWith('{') ? renderPartialSafely(raw, request) : raw;
                 yield { text, swipes: [], toolCalls: [], state: request.lastState };
             }
         };
@@ -234,14 +235,16 @@ async function onRequest(data) {
         const targetId = ['continue', 'swipe'].includes(active.type) ? context().chat.length - 1 : context().chat.length;
         pending = { ...request, chatId: active.chatId, type: active.type, base: active.base, targetId, processor, stream: Boolean(data.stream), raw: '', complete: false };
         data.messages = request.messages;
-        data.json_schema = request.schema;
+        if (request.schema) data.json_schema = request.schema;
         if (data.stream) {
             if (active.type === 'continue') processor.continueMessage = active.base;
             attachStream(processor, pending);
         }
         const budgetWarning = /(?:thinking|reasoning)/i.test(data.model ?? '') && Number(data.max_completion_tokens ?? data.max_tokens) < 1024
             ? ' Warning: this thinking model has a response limit below 1024 tokens and may stop before the final answer.' : '';
-        status(`Applied: JSON Schema prefix constraint (${request.compiled.settings.regexMode}).${request.compiled.settings.regexMode === 'portable' ? ' Continuation minimum is checked locally.' : ''}${budgetWarning}${generatorWarning}`);
+        status(request.mode === 'native'
+            ? `Requested: native assistant prefix before generation. Plain RP output; no JSON instruction.${request.warning}${budgetWarning}${generatorWarning}`
+            : `Applied: JSON Schema prefix constraint (${request.compiled.settings.regexMode}).${request.compiled.settings.regexMode === 'portable' ? ' Continuation minimum is checked locally.' : ''}${budgetWarning}${generatorWarning}`);
     } catch (error) {
         if (error.name === 'AbortError') throw error;
         // Invalid settings never partially mutate the outgoing request.
@@ -263,22 +266,23 @@ async function onReply(messageId) {
     }
     message.extra ??= {};
     if (request.stream) {
-        message.extra[KEY] = { validated: request.complete, ...(request.complete ? {} : { raw: request.raw, error: request.error ?? 'Generation interrupted before complete JSON.' }) };
+        message.extra[KEY] = { validated: request.mode === 'native' ? false : request.complete, ...(request.mode === 'native' ? { mode: 'native', completed: request.complete, prefixEnforced: 'unverified' } : {}), ...(request.complete ? {} : { raw: request.raw, error: request.error ?? 'Generation interrupted before complete reply.' }) };
     } else {
         let raw = message.mes;
         if (request.type === 'continue') {
             // ST normally prepends its original text (and possibly a postfix).
-            // Locate the JSON suffix without treating the previous chat text as JSON.
+            // Extract only the new answer; native prose keeps its joining whitespace.
             if (!raw.startsWith(request.base)) { status('Reply needs review: Continue base changed; reply left intact.'); pending = null; return; }
-            raw = raw.slice(request.base.length).trimStart();
+            raw = raw.slice(request.base.length);
+            if (request.mode !== 'native') raw = raw.trimStart();
         }
         try {
             const text = finish(raw, request);
             message.mes = (request.type === 'continue' ? request.base : '') + text;
-            message.extra[KEY] = { validated: true };
+            message.extra[KEY] = request.mode === 'native' ? { validated: false, mode: 'native', completed: true, prefixEnforced: 'unverified' } : { validated: true };
             if (Array.isArray(message.swipes) && Number.isInteger(message.swipe_id)) message.swipes[message.swipe_id] = message.mes;
             ctx.updateMessageBlock(messageId, message);
-            status('Applied: JSON reply validated and unwrapped.');
+            status(request.mode === 'native' ? 'RP reply completed. Local checks passed; native prefix consumption cannot be verified by the client.' : 'Applied: JSON reply validated and unwrapped.');
         } catch (error) {
             message.extra[KEY] = { validated: false, raw, error: error.message };
             status(`Reply needs review: ${error.message} Original reply left intact.`);
@@ -342,7 +346,11 @@ async function initialize() {
             if (action === 'preview') {
                 const value = readSettings();
                 const preview = panel.querySelector('#sp-preview');
-                preview.textContent = JSON.stringify(compileTemplate(context().substituteParams(value.prefill.replaceAll('[[pg]]', 'example opening')), { ...value, names: names() }).schema, null, 2);
+                const template = context().substituteParams(value.prefill.replaceAll('[[pg]]', 'example opening'));
+                const format = value.outputMode === 'native'
+                    ? { mode: 'native', assistantPrefix: prepareRequest({ chat_completion_source: 'moonshot', messages: [{ role: 'user', content: 'Example request' }] }, { ...value, enabled: true, useOverride: true, prefill: template }, { names: names() }).prefix, output: 'Plain prose, no JSON instruction or schema', note: 'This preview shows a native Moonshot prefix. Gateway support must be tested separately.' }
+                    : compileTemplate(template, { ...value, names: names() }).schema;
+                preview.textContent = JSON.stringify(format, null, 2);
                 preview.hidden = false;
             } else if (action === 'reset') { setSettings(DEFAULTS); refreshProfiles(); renderSettings(); }
             else if (action === 'export') json.value = JSON.stringify({ version: 1, settings: readSettings() }, null, 2);

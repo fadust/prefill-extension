@@ -9,6 +9,7 @@ test('literal prefixes, macros, keep marker, and minimum continuation', () => {
     c.validate(raw);
     assert.equal(c.display(raw), 'Ada: hello');
     assert.throws(() => c.validate('private note<NL>Ada: hi'));
+    assert.throws(() => c.validate('Ada: hello'), /Required prefix is missing or changed/);
     const literal = compileTemplate('.*+?[]()\\', { minimum: 0, hide: false });
     literal.validate('.*+?[]()\\done');
     assert.equal(literal.display('.*+?[]()\\done'), '.*+?[]()\\done');
@@ -27,6 +28,41 @@ test('Continue can recover an existing empty answer without consuming earlier hi
     assert.match(prepareRequest(request, { ...options, useOverride: false }, { type: 'continue', hasContinuation: true }).skipped, /enable local override/);
     const emptyTail = structuredClone(request); emptyTail.messages[1].content = '';
     assert.equal(prepareRequest(emptyTail, options, { type: 'continue', hasContinuation: true }).messages.some(message => message.role === 'assistant'), false);
+});
+
+test('native RP supplies a final assistant prefix, preserves systems, and adds no JSON request', () => {
+    const input = { chat_completion_source: 'moonshot', model: 'kimi-k2.5', messages: [{ role: 'user', content: 'Hello' }, { role: 'assistant', content: 'old prefix' }, { role: 'system', content: 'Stay in character' }] };
+    const before = structuredClone(input);
+    const result = prepareRequest(input, { enabled: true, outputMode: 'native', minimum: 0, prefill: 'hidden\n[[keep]]{{char}}: ' }, { substitute: text => text.replace('{{char}}', 'Ada') });
+    assert.equal(result.schema, undefined); assert.equal(result.mode, 'native');
+    assert.deepEqual(result.messages, [{ role: 'user', content: 'Hello' }, { role: 'system', content: 'Stay in character' }, { role: 'assistant', content: 'hidden\nAda: ', partial: true }]);
+    assert.deepEqual(input, before);
+    assert.equal(result.compiled.display('hello', true), 'Ada: hello');
+    assert.equal(result.compiled.display('hidden\nAda: hello', true), 'Ada: hello');
+    assert.equal(result.compiled.display('hid'), '');
+    assert.equal(result.compiled.display('{"value":"literal RP text"}', true), 'Ada: {"value":"literal RP text"}');
+    assert.throws(() => prepareRequest(input, { enabled: true, outputMode: 'native', prefill: '[[w:2]]' }), /literal text/);
+    assert.throws(() => normalizeSettings({ outputMode: 'unknown' }));
+    const deepseek = prepareRequest({ ...input, chat_completion_source: 'deepseek' }, { enabled: true, outputMode: 'native', prefill: 'Ada: ' });
+    assert.equal(deepseek.messages.at(-1).prefix, true); assert.equal(deepseek.messages.at(-1).partial, undefined);
+    const gateway = prepareRequest({ ...input, chat_completion_source: 'nanogpt' }, { enabled: true, outputMode: 'native', customProvider: true, prefill: 'Ada: ' });
+    assert.match(gateway.warning, /unverified/); assert.equal(gateway.messages.at(-1).partial, true);
+    assert.ok(prepareRequest({ ...input, chat_completion_source: 'openai' }, { enabled: true, outputMode: 'native' }).skipped);
+});
+
+test('native Continue uses the full saved answer once and preserves supplied prior reasoning', () => {
+    const base = 'The door opened. [[literal]]';
+    const input = { chat_completion_source: 'moonshot', type: 'continue', messages: [{ role: 'user', content: 'Hello' }, { role: 'assistant', content: base, reasoning_content: 'Prior provider reasoning' }, { role: 'system', content: 'Keep the scene' }] };
+    const options = { enabled: true, outputMode: 'native', minimum: 0, prefill: '[[keep]]Ada: ' };
+    const result = prepareRequest(input, options, { type: 'continue', continuation: base, hasContinuation: true });
+    assert.equal(result.messages.at(-1).content, 'Ada: ' + base);
+    assert.equal(result.messages.at(-1).reasoning_content, 'Prior provider reasoning');
+    assert.equal(result.compiled.display(' More.', true), ' More.');
+    assert.equal(result.compiled.display('Ada: ' + base + ' More.', true), ' More.');
+    const empty = prepareRequest(input, options, { type: 'continue', hasContinuation: true });
+    assert.equal(empty.messages[1].content, base); // Preserve earlier answer when current answer is empty.
+    assert.equal(empty.messages.at(-1).content, 'Ada: ');
+    assert.throws(() => prepareRequest(input, { ...options, minimum: 3 }, { type: 'continue', continuation: base, hasContinuation: true }).compiled.validate('x'), /local minimum/);
 });
 
 

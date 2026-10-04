@@ -3,9 +3,12 @@
     <div class="inline-drawer-toggle inline-drawer-header"><b>StructuredPrefill clean</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
     <div class="inline-drawer-content">
       <label class="checkbox_label"><input type="checkbox" data-setting="enabled"> Enabled</label>
+      <label for="sp-output-mode">Reply mode</label>
+      <select id="sp-output-mode" class="text_pole" data-setting="outputMode"><option value="native">Native RP prefill (plain prose)</option><option value="json">JSON Schema (hidden JSON transport)</option></select>
+      <p class="sp-help">Native mode supplies the prefix before generation starts. It cannot control the model's internal thinking order. Native gateway support must be verified; variable slots require JSON Schema mode.</p>
       <label class="checkbox_label"><input type="checkbox" data-setting="hide"> Hide prefill text in saved/displayed replies</label>
       <label for="sp-status">Last status</label>
-      <output id="sp-status" role="status" aria-live="polite">Ready. Enable for a model with JSON Schema pattern support.</output>
+      <output id="sp-status" role="status" aria-live="polite">Ready. Choose a reply mode supported by your model.</output>
       <label class="checkbox_label"><input type="checkbox" data-setting="useOverride"> Use local override prefill</label>
       <label for="sp-prefill">Override prefill text</label>
       <textarea id="sp-prefill" class="text_pole" data-setting="prefill" rows="7" maxlength="4000" spellcheck="false"></textarea>
@@ -24,7 +27,7 @@
         <label for="sp-banned">Banned phrases (one per line; ASCII case-insensitive)</label>
         <textarea id="sp-banned" class="text_pole" data-setting="banned" rows="4" maxlength="2000"></textarea>
         <p class="sp-help">Portable mode uses a DFA for continuation bans and validates the decoded continuation minimum locally. Provider enforcement varies; violations are reported and the raw reply is retained for recovery.</p>
-        <label class="checkbox_label"><input type="checkbox" data-setting="customProvider"> Enable Custom/NanoGPT (my model supports JSON Schema patterns)</label>
+        <label class="checkbox_label"><input type="checkbox" data-setting="customProvider"> Enable Custom/NanoGPT (verify support for the selected reply mode)</label>
       </details>
       <details>
         <summary>Prefill generator: [[pg]]</summary>
@@ -50,7 +53,7 @@
         <div class="sp-buttons"><button type="button" class="menu_button" data-action="save">Save</button><button type="button" class="menu_button" data-action="load">Load</button><button type="button" class="menu_button" data-action="rename">Rename</button><button type="button" class="menu_button" data-action="delete">Delete</button><button type="button" class="menu_button" data-action="export">Export</button><button type="button" class="menu_button" data-action="import">Import</button></div>
         <label for="sp-preset-json">Preset JSON (copy/paste to import or export)</label><textarea id="sp-preset-json" class="text_pole" rows="4" maxlength="20000" spellcheck="false"></textarea>
       </details>
-      <div class="sp-buttons"><button type="button" class="menu_button" data-action="preview">Preview schema</button><button type="button" class="menu_button" data-action="reset">Reset settings</button></div>
+      <div class="sp-buttons"><button type="button" class="menu_button" data-action="preview">Preview request format</button><button type="button" class="menu_button" data-action="reset">Reset settings</button></div>
       <pre id="sp-preview" hidden></pre>
     </div>
   </div>

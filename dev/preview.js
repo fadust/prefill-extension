@@ -31,15 +31,16 @@ async function demo(type, stream, invalid = false) {
     } : null;
     ctx.streamingProcessor = processor;
     await emit(eventTypes.GENERATION_STARTED, type, {}, false);
-    const data = { chat_completion_source: 'openrouter', stream, n: 1, messages: [{ role: 'user', content: 'Write the next scene.' }] };
+    const native = ctx.extensionSettings.structuredPrefillClean.outputMode === 'native';
+    const data = { chat_completion_source: native ? 'moonshot' : 'openrouter', model: native ? 'kimi-k2.5' : 'example', stream, n: 1, messages: [{ role: 'user', content: 'Write the next scene.' }] };
     await emit(eventTypes.CHAT_COMPLETION_SETTINGS_READY, data);
-    if (!data.json_schema) { result.textContent = 'No schema applied. Enable the extension to run this demo.'; await emit(eventTypes.GENERATION_ENDED); return; }
+    if (!data.json_schema && !(native && data.messages.at(-1)?.role === 'assistant')) { result.textContent = 'No prefix applied. Enable the extension to run this demo.'; await emit(eventTypes.GENERATION_ENDED); return; }
     const text = ' and the room fell quiet. She checked the old lamp, found the loose switch, and smiled as the warm glow returned.';
     const config = ctx.extensionSettings.structuredPrefillClean;
     const prefix = ctx.substituteParams(config.prefill).replace(/\[\[(?:keep|pg|end|stop|eos)\]\]/g, '').replaceAll('\n', config.newline);
     const overlap = config.overlap ? [...base].slice(-config.overlap).join('') : '';
     const value = type === 'continue' ? prefix + overlap + text : prefix + 'Welcome. I found the note you left by the door, and I brought the map. Shall we start with the northern trail?';
-    const raw = invalid ? 'This provider returned plain text instead of JSON.' : JSON.stringify({ value });
+    const raw = invalid ? 'This provider returned plain text instead of JSON.' : native ? type === 'continue' ? text : 'Welcome. I found the note you left by the door, and I brought the map. Shall we start with the northern trail?' : JSON.stringify({ value });
     if (stream) {
         processor.generator = async function* () { for (let i = 1; i <= raw.length; i += 3) yield { text: raw.slice(0, i), state: {} }; yield { text: raw, state: {} }; };
         await processor.onStartStreaming('...');

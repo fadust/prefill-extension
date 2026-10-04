@@ -2,6 +2,7 @@ import { portableBanPattern } from './bans.js';
 // Original implementation. This module has no host, DOM, or network dependencies.
 export const DEFAULTS = Object.freeze({
     enabled: false, hide: true, useOverride: true, prefill: '[[keep]]\n{{char}}: ',
+    outputMode: 'json',
     minimum: 80, newline: '<NL>', overlap: 80, banned: '', customProvider: false, regexMode: 'auto', streamGuard: true,
     generatorProfile: '', generatorTokens: 24, generatorTimeout: 15000,
     generatorStops: '', generatorKeepStop: false, generatorRole: 'system', generatorPrompt: 'Write a short opening for the next assistant reply. Return only the opening text.',
@@ -36,6 +37,7 @@ export function normalizeSettings(input = {}) {
     result.generatorTokens = integer(result.generatorTokens, 1, 256, 'Generator tokens');
     result.generatorTimeout = integer(result.generatorTimeout, 1000, 120000, 'Generator timeout');
     if (!['auto', 'standard', 'portable'].includes(result.regexMode)) throw new Error('Regex mode must be auto, standard, or portable.');
+    if (!['json', 'native'].includes(result.outputMode)) throw new Error('Reply mode must be json or native.');
     if (!['system', 'user', 'assistant'].includes(result.generatorRole)) throw new Error('Generator prompt role must be system, user, or assistant.');
     if (result.prefill.length > MAX_TEMPLATE) throw new Error('Prefill exceeds 4000 characters.');
     if (result.banned.length > 2000) throw new Error('Banned phrases exceed 2000 characters.');
@@ -321,17 +323,75 @@ export class StreamGuard {
     }
 }
 
+function prepareNativeRequest(data, settings, { type, names, substitute, continuation, hasContinuation }) {
+    const messages = structuredClone(data.messages);
+    let tailIndex = messages.length - 1;
+    while (tailIndex >= 0 && messages[tailIndex]?.role === 'system') tailIndex--;
+    const last = messages[tailIndex];
+    if (last?.tool_calls?.length) return { skipped: 'assistant tool calls cannot be used as a native prefix' };
+    let template = settings.useOverride ? substitute(settings.prefill) : '';
+    let previous = {};
+    if (type === 'continue') {
+        if (!hasContinuation) return { skipped: 'no assistant message to continue' };
+        if (last?.role === 'assistant' && (continuation || last.content === '' || last.content === template || names.some(name => last.content === `${name}: `))) {
+            if (typeof last.content !== 'string' || !last.content.endsWith(continuation)) return { skipped: 'Continue request does not contain the saved assistant base' };
+            if (!settings.useOverride) {
+                template = continuation ? last.content.slice(0, -continuation.length) : '';
+                if (names.some(name => template === `${name}: `)) template = '';
+            }
+            previous = last;
+            messages.splice(tailIndex, 1);
+        }
+        template = template.replace(/\[\[\s*(?:pg|keep|end|stop|eos)\s*\]\]/gi, '');
+    } else {
+        if (!settings.useOverride && (last?.role !== 'assistant' || typeof last.content !== 'string' || last.tool_calls?.length)) return { skipped: 'no trailing text assistant prefill' };
+        if (!settings.useOverride) template = last.content;
+        if (last?.role === 'assistant' && typeof last.content === 'string' && !last.tool_calls?.length) messages.splice(tailIndex, 1);
+    }
+    template = template.replace(/\r\n?/g, '\n');
+    const pieces = template.split('[[keep]]');
+    if (pieces.length > 2 || pieces.some(part => part.includes('[['))) throw new Error('Native RP mode accepts literal text, macros, [[keep]], and a resolved [[pg]]; use JSON Schema mode for variable slots.');
+    const prefix = pieces.join('') + (type === 'continue' ? continuation : '');
+    if (!prefix) return { skipped: 'native prefill is empty' };
+    const visible = type === 'continue' ? '' : settings.hide ? pieces.length === 2 ? pieces[1] : '' : prefix;
+    const assistant = { ...previous, role: 'assistant', content: prefix };
+    delete assistant.prefix; delete assistant.partial;
+    // Provider flags describe an answer prefix, never synthetic reasoning.
+    const source = data.chat_completion_source;
+    if (source === 'deepseek' || /deepseek/i.test(data.model ?? '')) assistant.prefix = true;
+    else if (source === 'moonshot' || /(?:kimi|moonshot)/i.test(data.model ?? '')) assistant.partial = true;
+    messages.push(assistant); // Last, after preserved system messages, before inference.
+    const compiled = {
+        settings,
+        display(raw, complete = false) {
+            if (!complete && raw.length < prefix.length && prefix.startsWith(raw)) return '';
+            const tail = raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+            return tail ? visible + tail : '';
+        },
+        validate(raw) {
+            const tail = raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
+            if ([...tail].length < settings.minimum) throw new Error('Final RP answer was shorter than the local minimum continuation length.');
+            const fold = text => text.replace(/[A-Z]/g, char => char.toLowerCase());
+            const bans = settings.banned.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+            if (bans.some(phrase => fold(prefix + tail).includes(fold(phrase)))) throw new Error('Final RP answer contained a banned phrase.');
+        },
+    };
+    return { mode: 'native', messages, compiled, prefix, warning: ['nanogpt', 'custom', 'openrouter'].includes(source)
+        ? ' Gateway native-prefill support is unverified; it may reject or ignore the prefix.' : '' };
+}
+
 export function prepareRequest(data, options, { type = data.type ?? 'normal', names = [], substitute = x => x, continuation = '', hasContinuation = Boolean(continuation) } = {}) {
     const settings = normalizeSettings(options);
     if (!settings.enabled) return { skipped: 'extension is disabled' };
     if (data.type && data.type !== type) return { skipped: 'background request type does not match the active generation' };
     if (!['normal', 'regenerate', 'swipe', 'continue'].includes(type)) return { skipped: `${type} generation` };
-    const sources = ['openai', 'azure_openai', 'openrouter', 'groq', 'fireworks'];
-    if (!sources.includes(data.chat_completion_source) && !(settings.customProvider && ['custom', 'nanogpt'].includes(data.chat_completion_source))) return { skipped: 'provider is not enabled for JSON Schema' };
+    const sources = settings.outputMode === 'native' ? ['moonshot', 'deepseek', 'openrouter'] : ['openai', 'azure_openai', 'openrouter', 'groq', 'fireworks'];
+    if (!sources.includes(data.chat_completion_source) && !(settings.customProvider && ['custom', 'nanogpt'].includes(data.chat_completion_source))) return { skipped: `provider is not enabled for ${settings.outputMode === 'native' ? 'native prefill' : 'JSON Schema'}` };
     if (data.json_schema || data.response_format) return { skipped: 'request already has a response schema' };
     if (data.tools?.length || data.tool_choice && data.tool_choice !== 'none') return { skipped: 'tool calling is active' };
     if ((data.n ?? 1) !== 1) return { skipped: 'multiple completions are active; set n to 1' };
     if (!Array.isArray(data.messages)) return { skipped: 'no chat-completion messages' };
+    if (settings.outputMode === 'native') return prepareNativeRequest(data, settings, { type, names, substitute, continuation, hasContinuation });
     // Never remove an arbitrary assistant-history message: the prefill must be
     // explicitly selected with override or be the trailing assistant message.
     const messages = structuredClone(data.messages);

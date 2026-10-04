@@ -1,6 +1,6 @@
 # StructuredPrefill clean
 
-An original SillyTavern UI extension that turns an assistant prefix into a JSON Schema response constraint, then unwraps the returned `{ "value": "…" }` into chat text. The compact settings panel follows the supplied visual reference.
+An original SillyTavern UI extension with two reply modes: native assistant prefill for ordinary RP prose, and JSON Schema constraints for structured templates. The JSON mode unwraps the returned `{ "value": "…" }` into chat text. The compact settings panel follows the supplied visual reference.
 
 Written from the reference project's README as a behavioral specification and SillyTavern's public host interfaces. No code was copied from the reference implementation.
 
@@ -14,30 +14,42 @@ The extension has no npm dependencies, build step, server plugin, or external sc
 
 ## First use
 
-1. Choose **Chat Completion** and a model/provider that enforces JSON Schema **string patterns**. Support for JSON mode alone is insufficient.
+1. Choose **Chat Completion** and a model/provider that supports your selected reply mode.
 2. Set the number of completions to **1** and disable function calling for this request.
 3. Open **StructuredPrefill clean** in Extensions. It starts disabled.
-4. Enable it and use the local override, for example `[[keep]]{{char}}: `. SillyTavern expands normal macros.
-5. Generate a reply and read **Last status**. “Validated and unwrapped” means the returned JSON passed local checks. “Applied: JSON Schema prefix constraint” means the request was transformed; it is not confirmation that the provider accepted it.
+4. For ordinary RP, select **Native RP prefill (plain prose)**. Use a literal override, for example `[[keep]]{{char}}: `. SillyTavern expands normal macros. Native mode sends no JSON instruction or schema.
+5. For variable template slots, choose **JSON Schema (hidden JSON transport)** and a provider that enforces JSON Schema **string patterns**. Support for JSON mode alone is insufficient.
+6. Enable the extension, generate a reply, and read **Last status**. “Validated and unwrapped” means the returned JSON passed local checks. Native completion means ordinary prose passed local length/ban checks; it does not prove the provider consumed the assistant prefix.
 
 The final non-system assistant message is treated as the prefill; trailing system instructions remain in place. With local override off its text becomes the schema prefix; with override on it is replaced by the text box. Use a final assistant prompt in SillyTavern's Prompt Manager for this mode. Do not put ordinary history there that you want retained as conversation context. The saved chat is never used as the mutable request array.
 
 The default is a neutral character-name prefix, 80 minimum continuation characters, and `<NL>` as the newline placeholder. No built-in instructions ask the model to change its safety behavior or disclose private reasoning.
+
+## Native RP prefill (v1.2)
+
+Native mode places the override as the **final assistant message in the outgoing request**, after preserved system messages and before the provider starts generation. It uses Moonshot/Kimi's `partial` or DeepSeek's `prefix` flag where applicable. The reply remains ordinary prose throughout streaming and saving: there is no `Return only a JSON object…` instruction and no JSON parser in this reply path. A literal prefix echo is removed once; providers that return only the new continuation are supported too.
+
+This positions the prefix before generated **answer text**. An extension cannot force an API provider to process it before internal reasoning or stop reasoning from consuming the response budget. Native support must exist at the provider: direct Moonshot and DeepSeek routes are enabled, while OpenRouter, Custom, and NanoGPT forwarding must be tested with the selected model. Custom/NanoGPT remain opt-in. Unsupported gateways may reject or ignore the prefix; the client reports this limitation rather than labeling the reply schema-validated. See [Kimi partial mode](https://platform.kimi.ai/docs/guide/use-partial-mode-feature-of-kimi-api) and [DeepSeek prefix completion](https://api-docs.deepseek.com/guides/chat_prefix_completion/).
+
+Literal text, normal SillyTavern macros, `[[keep]]`, and a resolved optional `[[pg]]` are supported. Variable slots require JSON Schema mode. Native mode uses real newlines; newline tokens, schema regex settings, and Continue overlap do not apply. Minimum continuation length and banned phrases are local checks, not provider constraints. Continue supplies the chosen prefix followed by the entire saved answer once, hides both from the appended continuation, and preserves prior reasoning fields already supplied by the host. It never fabricates reasoning.
+
+Existing installations retain JSON mode until **Reply mode** is changed explicitly. Switching modes preserves the override and does not regenerate or repair old replies automatically. A malformed JSON reply remains recoverable through the saved raw data described below.
 
 ## Settings
 
 | Setting | Behavior |
 | --- | --- |
 | Enabled | Opts in to request transformation. Disabled requests pass through. |
+| Reply mode | Native assistant prefix with plain prose, or JSON Schema with a hidden single-field envelope. Default JSON preserves existing settings. |
 | Hide prefill | Removes the matched hidden portion before display **and saving**. Changes apply to future generations. |
 | Local override | Uses the text box instead of consuming the final assistant request message. |
-| Minimum characters | Requests a minimum continuation length and validates decoded text afterward. Ignored with an end marker. |
-| Newline token | Encodes template line breaks; decodes the placeholder throughout the reply. Pick a token absent from your template and intended prose. |
+| Minimum characters | Validates continuation length locally in either mode. JSON mode also requests a minimum; ignored with a JSON end marker. |
+| Newline token | JSON mode only: encodes template line breaks and decodes the placeholder throughout the reply. Pick a token absent from your template and intended prose. |
 | Schema regex mode | Auto chooses portable mode for Claude/Anthropic model names; Standard and Portable can be selected explicitly. |
 | Stream guard | Stops growing streams with no decoded progress for 15 seconds after 5,000 characters, or 2,048 consecutive repeated/whitespace padding characters. Can be disabled; the 1 MB budget always applies. |
-| Continue overlap | Repeats the final N Unicode characters as a literal schema prefix, then removes that repeated prefix from the continuation. Zero removes the overlap requirement. |
+| Continue overlap | JSON mode only: repeats the final N Unicode characters as a literal schema prefix, then removes that repeated prefix from the continuation. Zero removes the overlap requirement. |
 | Banned phrases | Literal substring bans; ASCII letters are case-insensitive. Maximum 30 phrases of 80 characters each. |
-| Custom/NanoGPT support | Explicitly enables those routes after you establish your selected model supports patterns. |
+| Custom/NanoGPT support | Explicitly enables those routes after you establish support for the selected reply mode. |
 
 `[[keep]]` is a zero-width template marker: text before it is hidden, and text after it remains visible. Without a keep marker, Hide removes the entire matched template. The marker itself is never generated. Template slots are matched against the generated prefix, so a cutoff may follow a variable slot. Prefer fixed delimiters after variable slots to make the boundary unambiguous.
 
@@ -91,7 +103,7 @@ Save, load, rename, delete, and copy/paste JSON presets in the Local presets sec
 
 This implements the extension workflow; the reference's separate proxy is outside this package.
 
-The request hook uses SillyTavern's `json_schema = { name, strict, value }` format, which its server maps to provider response formats. Enabled routes are OpenAI, Azure OpenAI, OpenRouter, Groq, and Fireworks; Custom and NanoGPT are opt-in. **A listed route does not imply every model supports the required schema.** Direct Anthropic and text-completion backends are skipped. Unsupported models may reject the request or ignore constraints; there is no automatic paid retry or silent capability downgrade.
+In JSON mode, the request hook uses SillyTavern's `json_schema = { name, strict, value }` format, which its server maps to provider response formats. Enabled JSON routes are OpenAI, Azure OpenAI, OpenRouter, Groq, and Fireworks; Custom and NanoGPT are opt-in. **A listed route does not imply every model supports the required schema.** Native routes are described above. Direct Anthropic and text-completion backends are skipped. Unsupported models may reject the request or ignore constraints; there is no automatic paid retry or silent capability downgrade.
 
 Standard mode uses a negative lookahead to ban phrases anywhere in the reply. Portable mode uses an original, exact DFA-to-regex compiler on the **continuation**, handles overlapping matches and incomplete endings, and avoids lookaheads, whitespace shorthands, non-ASCII pattern literals, and bounded-count quantifiers. To prevent runaway compiler growth it allows up to 60 ban-prefix states and 16,000 pattern characters; complex lists are rejected explicitly. Local validation rejects banned phrases anywhere in either mode, including the generated prefix. A prefix that itself contains a ban therefore cannot validate.
 
@@ -115,7 +127,7 @@ Malformed, interrupted, and constraint-violating replies show a status message. 
 
 No telemetry, external code/CDN loading, arbitrary code execution, global networking patches, or credential collection. All model requests go through SillyTavern's existing services. Data you choose to send remains subject to your model provider's behavior.
 
-The parser stops processing envelopes above 1 MB. Streaming incrementally decodes new characters, preserving split escapes and surrogate pairs, and validates the complete envelope at the end. Changing the chat or active swipe cancels a structured stream without updating the newly selected reply. The guard operates on decoded progress before prefix hiding so long hidden prefixes are not mistaken for stalls. It depends on SillyTavern's stop-generation interface to cancel the provider request.
+Both reply modes stop processing above 1 MB. JSON streaming incrementally decodes new characters, preserving split escapes and surrogate pairs, and validates the complete envelope at the end. Native streaming passes plain prose through prefix hiding and local checks. Changing the chat or active swipe cancels the wrapped stream without updating the newly selected reply. The guard operates on text progress before prefix hiding so long hidden prefixes are not mistaken for stalls. It depends on SillyTavern's stop-generation interface to cancel the provider request.
 
 ## Development and verification
 
@@ -129,7 +141,7 @@ node dev/server.mjs
 
 Open `http://127.0.0.1:8787` for the settings UI and simulated streamed/standard/Continue/recovery demos. The preview uses a fake host and makes no model API requests. It listens only on localhost and serves an explicit file allowlist.
 
-The 23 automated checks cover escaping, slots, exact integer intervals, exhaustive short-string ban comparisons, portable regex syntax, every streaming split of a JSON string, Unicode, guards, invalid settings, pass-through behavior, request isolation, stream state, swipe changes, Continue joining, reasoning-only cutoff recovery, generator success/failure, preset migration, and single initialization. Browser checks cover settings rendering and simulated reply handling. **These checks are not a live SillyTavern/provider certification:** test a short reply with your installed host version and chosen model before relying on the extension.
+The 26 automated checks cover escaping, slots, exact integer intervals, exhaustive short-string ban comparisons, portable regex syntax, every streaming split of a JSON string, Unicode, guards, invalid settings, pass-through behavior, request isolation, stream state, swipe changes, Continue joining, reasoning-only cutoff recovery, generator success/failure, preset migration, and single initialization. Native checks cover request order, provider flags, prefix echoes, unchanged ordinary prose, prior-reasoning preservation, and streamed/non-streamed/Continue replies without a JSON envelope. Browser checks cover settings rendering and simulated reply handling. **These checks are not a live SillyTavern/provider certification:** test a short reply with your installed host version and chosen model before relying on the extension.
 
 ## Reference code comparison (v1.1)
 
@@ -147,7 +159,7 @@ Compared the reference's `index.js`, settings, manifest, and the official SillyT
 | Generator context and controls | Remove the prefill from generator context; add prompt roles, API stop strings, and returned stop retention. |
 | Long or runaway streams | Incremental decoding, explicit size/stall/padding guards, and target/swap cancellation. |
 
-Intentional remaining differences: strict single-field JSON (no loose malformed-JSON repair or legacy response wrappers); bounded custom regexes; no automatic quote/punctuation rewrites; no forced lowercase Continue-join character; no DOM observers/renderer replacement; and copy/paste preset import/export rather than a file-dialog workflow. SillyTavern's renderer, Markdown, user regexes, scrolling, and reasoning remain host-managed. Non-stream cleanup extensions can still affect JSON before our reply event, as described above.
+Intentional remaining differences: strict single-field JSON in schema mode (no loose malformed-JSON repair or legacy response wrappers); bounded custom regexes; no automatic quote/punctuation rewrites; no forced lowercase Continue-join character; no DOM observers/renderer replacement; and copy/paste preset import/export rather than a file-dialog workflow. v1.2 adds optional native assistant prefill for ordinary prose. SillyTavern's renderer, Markdown, user regexes, scrolling, and reasoning remain host-managed. Non-stream cleanup extensions can still affect JSON before our reply event, as described above.
 
 We did not copy the reference's blanket OpenAI exclusion: the inspected official release backend maps `json_schema` to `response_format` for its Chat Completions path. Other host versions using a different OpenAI request path need separate verification. Its permissive unsupported-provider fallback, unbounded generator token settings, heuristic text rewrites, and numeric-range approximations were also not adopted.
 
