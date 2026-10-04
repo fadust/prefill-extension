@@ -109,6 +109,8 @@ Tool calls, multiple completions, quiet/impersonate requests, and existing respo
 
 Continue can now recover an existing assistant message with empty answer text when local override is enabled. It asks for the final reply, without adding empty-answer overlap or treating the previous reasoning as visible prose. Earlier conversation remains intact. Without local override, use Regenerate or enable the override. The host's separate reasoning display remains host-managed; Hide prefill only removes the matched template portion from answer text.
 
+v1.1.2 identifies a missing/changed required prefix separately from other constraint failures and explicitly tells the model that the prefix belongs inside `value`, not in the reasoning field. A neutral prefix such as `[[keep]]Narrator: ` avoids markup that host reasoning parsers can intercept. Provider pattern enforcement still must be verified; an incompatible reply remains unvalidated and recoverable, never relabeled as successful.
+
 Malformed, interrupted, and constraint-violating replies show a status message. Standard replies remain intact on validation failure. Streaming retains the safely decoded partial text (or plain refusal) and stores the raw output in `message.extra.structuredPrefillClean.raw` with an error. This recovery data is saved locally with the chat and may include hidden prefill text. Successful replies store only a validation flag, not a duplicate raw response.
 
 No telemetry, external code/CDN loading, arbitrary code execution, global networking patches, or credential collection. All model requests go through SillyTavern's existing services. Data you choose to send remains subject to your model provider's behavior.

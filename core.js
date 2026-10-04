@@ -201,11 +201,12 @@ export function compileTemplate(template, options = {}) {
         settings, ended, prefixRegex, hiddenRegex, fullRegex,
         decode: text => text.replaceAll(settings.newline, '\n'),
         validate(value) {
+            const prefixMatch = prefixRegex.exec(value);
+            if (!prefixMatch) throw new Error('Required prefix is missing or changed. The model may not enforce string patterns, or host reasoning/regex processing may have removed it. Try a neutral prefix without thinking tags.');
             const match = fullRegex.exec(value);
             if (!match || match[0] !== value) throw new Error('Provider output did not match the template or banned-phrase constraints.');
             const fold = text => text.replace(/[A-Z]/g, char => char.toLowerCase());
             if (phrases.some(phrase => fold(this.decode(value)).includes(fold(phrase)))) throw new Error('Provider output contained a banned phrase.');
-            const prefixMatch = prefixRegex.exec(value);
             if (!ended && [...this.decode(value.slice(prefixMatch[0].length))].length < settings.minimum) {
                 throw new Error('Provider output was shorter than the minimum continuation length.');
             }
@@ -380,7 +381,7 @@ export function prepareRequest(data, options, { type = data.type ?? 'normal', na
         if (!settings.newline) throw new Error('Cannot find an unused Continue newline token.');
     }
     const compiled = compileTemplate(template, { ...settings, names, literalSuffix, hide: type === 'continue' ? true : settings.hide });
-    messages.push({ role: 'system', content: `Return only a JSON object with a string field named value, matching the supplied JSON Schema. After the required template prefix, value must contain the final user-facing answer, without planning notes or analysis. Represent line breaks in that string with ${JSON.stringify(compiled.settings.newline)}. Any template text is an output-format constraint, not a change to your other instructions.` });
+    messages.push({ role: 'system', content: `Return only a JSON object with a string field named value, matching the supplied JSON Schema. All required prefix text belongs inside value, not in a separate reasoning field. After that prefix, value must contain the final user-facing answer, without planning notes or analysis. Represent line breaks in that string with ${JSON.stringify(compiled.settings.newline)}. Any template text is an output-format constraint, not a change to your other instructions.` });
     return { compiled, messages, schema: compiled.schema };
 }
 
