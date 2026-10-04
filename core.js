@@ -320,7 +320,7 @@ export class StreamGuard {
     }
 }
 
-export function prepareRequest(data, options, { type = data.type ?? 'normal', names = [], substitute = x => x, continuation = '' } = {}) {
+export function prepareRequest(data, options, { type = data.type ?? 'normal', names = [], substitute = x => x, continuation = '', hasContinuation = Boolean(continuation) } = {}) {
     const settings = normalizeSettings(options);
     if (!settings.enabled) return { skipped: 'extension is disabled' };
     if (data.type && data.type !== type) return { skipped: 'background request type does not match the active generation' };
@@ -339,11 +339,12 @@ export function prepareRequest(data, options, { type = data.type ?? 'normal', na
     const last = messages[tailIndex];
     let template, literalSuffix = '';
     if (type === 'continue') {
-        if (!continuation) return { skipped: 'no assistant message to continue' };
+        if (!hasContinuation) return { skipped: 'no assistant message to continue' };
+        if (!continuation && !settings.useOverride) return { skipped: 'previous reply has no answer text; enable local override to recover it, or regenerate' };
         literalSuffix = settings.overlap ? [...continuation].slice(-settings.overlap).join('') : '';
         template = settings.useOverride ? substitute(settings.prefill) : '';
         // The continued text remains as context, without a trailing prefill.
-        if (last?.role === 'assistant') {
+        if (continuation && last?.role === 'assistant') {
             // Discard an exact PM prefix only when the base is an identifiable
             // suffix; fuzzy matches could remove legitimate conversation text.
             if (typeof last.content !== 'string' || !last.content.endsWith(continuation)) return { skipped: 'Continue request does not contain the saved assistant base' };
@@ -353,7 +354,12 @@ export function prepareRequest(data, options, { type = data.type ?? 'normal', na
             }
             last.content = continuation;
         }
-        if (last?.role === 'assistant' && last.content === continuation) {
+        if (!continuation) {
+            // A reasoning-only reply is still an existing assistant message.
+            // Keep prior history; remove only an empty tail or an exact prefill.
+            if (last?.role === 'assistant' && (last.content === '' || last.content === template || names.some(name => last.content === `${name}: `))) messages.splice(tailIndex, 1);
+            messages.push({ role: 'user', content: 'The previous assistant response contained no final answer. Provide the requested final reply now.' });
+        } else if (last?.role === 'assistant' && last.content === continuation) {
             messages.push({ role: 'user', content: 'Continue the previous assistant message from its end. Do not repeat it, except for the overlap required by the response schema.' });
         }
         // Continue reuses the chosen prefix but never runs a generator, honors
@@ -374,7 +380,7 @@ export function prepareRequest(data, options, { type = data.type ?? 'normal', na
         if (!settings.newline) throw new Error('Cannot find an unused Continue newline token.');
     }
     const compiled = compileTemplate(template, { ...settings, names, literalSuffix, hide: type === 'continue' ? true : settings.hide });
-    messages.push({ role: 'system', content: `Return only a JSON object with a string field named value, matching the supplied JSON Schema. Represent line breaks in that string with ${JSON.stringify(compiled.settings.newline)}. Any template text is an output-format constraint, not a change to your other instructions.` });
+    messages.push({ role: 'system', content: `Return only a JSON object with a string field named value, matching the supplied JSON Schema. After the required template prefix, value must contain the final user-facing answer, without planning notes or analysis. Represent line breaks in that string with ${JSON.stringify(compiled.settings.newline)}. Any template text is an output-format constraint, not a change to your other instructions.` });
     return { compiled, messages, schema: compiled.schema };
 }
 

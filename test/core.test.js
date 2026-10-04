@@ -14,6 +14,22 @@ test('literal prefixes, macros, keep marker, and minimum continuation', () => {
     assert.equal(literal.display('.*+?[]()\\done'), '.*+?[]()\\done');
 });
 
+test('Continue can recover an existing empty answer without consuming earlier history', () => {
+    const options = { useOverride: true, hide: true, enabled: true, minimum: 0, prefill: '[[keep]]Ada: ' };
+    const request = { chat_completion_source: 'openrouter', type: 'continue', messages: [{ role: 'user', content: 'Hello' }, { role: 'assistant', content: 'Earlier answer' }] };
+    const result = prepareRequest(request, options, { type: 'continue', continuation: '', hasContinuation: true });
+    assert.ok(result.schema);
+    assert.equal(result.messages[1].content, 'Earlier answer');
+    assert.match(result.messages[2].content, /no final answer/);
+    result.compiled.validate('Ada: recovered');
+    assert.equal(result.compiled.display('Ada: recovered'), 'recovered');
+    assert.match(prepareRequest(request, options, { type: 'continue', hasContinuation: false }).skipped, /no assistant/);
+    assert.match(prepareRequest(request, { ...options, useOverride: false }, { type: 'continue', hasContinuation: true }).skipped, /enable local override/);
+    const emptyTail = structuredClone(request); emptyTail.messages[1].content = '';
+    assert.equal(prepareRequest(emptyTail, options, { type: 'continue', hasContinuation: true }).messages.some(message => message.role === 'assistant'), false);
+});
+
+
 test('stub counts, exact numerical ranges, choices, names, lines, and end', () => {
     const c = compileTemplate('[[name]]: [[w:2-3]] | [[opt:yes|no]] | [[number:-100-100]] | [[emotion]][[end]]', { names: ['Ada', 'U.ser'], minimum: 80, hide: false });
     c.validate('U.ser: one two | yes | -99 | calm');

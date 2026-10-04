@@ -92,6 +92,39 @@ test('host integration: Continue keeps the original text exactly once, including
     await emit(events.GENERATION_ENDED);
 });
 
+test('host integration: reasoning-only cutoff is diagnosed and empty Continue recovers on the same message', async () => {
+    enabled(); ctx.chat = []; const p = processor();
+    await emit(events.GENERATION_STARTED, 'normal', {}, false);
+    const request = { ...data(true), model: 'example:thinking', max_tokens: 300 };
+    await emit(events.CHAT_COMPLETION_SETTINGS_READY, request);
+    assert.equal(request.max_tokens, 300); // Never silently increase paid budgets.
+    assert.match(node('#sp-status').textContent, /limit below 1024/);
+    const state = { reasoning: 'Planning stopped before the answer.' };
+    p.generator = async function* () { yield { text: '', state }; };
+    await p.onStartStreaming('...');
+    for await (const chunk of p.generator()) { ctx.chat[0].mes = chunk.text; assert.equal(chunk.state, state); }
+    await emit(events.GENERATION_ENDED);
+    assert.equal(ctx.chat[0].mes, '');
+    assert.match(ctx.chat[0].extra.structuredPrefillClean.error, /reasoning but no final answer/);
+    const saved = ctx.chat[0];
+    const recovery = processor('continue');
+    await emit(events.GENERATION_STARTED, 'continue', {}, false);
+    const next = { ...data(true), type: 'continue' };
+    await emit(events.CHAT_COMPLETION_SETTINGS_READY, next);
+    assert.ok(next.json_schema);
+    assert.match(next.messages.at(-2).content, /no final answer/);
+    const raw = JSON.stringify({ value: 'private<NL>Ada: Here is the answer.' });
+    recovery.generator = async function* () { yield { text: raw, state: {} }; };
+    await recovery.onStartStreaming('...');
+    for await (const chunk of recovery.generator()) ctx.chat[0].mes = chunk.text;
+    await emit(events.MESSAGE_RECEIVED, 0);
+    assert.equal(ctx.chat.length, 1);
+    assert.equal(ctx.chat[0], saved);
+    assert.equal(saved.mes, 'Here is the answer.');
+    assert.deepEqual(saved.extra.structuredPrefillClean, { validated: true });
+    await emit(events.GENERATION_ENDED);
+});
+
 test('host integration: invalid and interrupted replies retain raw recovery data', async () => {
     enabled(); ctx.chat = []; ctx.streamingProcessor = null;
     await emit(events.GENERATION_STARTED, 'normal', {}, false);

@@ -105,6 +105,10 @@ Tool calls, multiple completions, quiet/impersonate requests, and existing respo
 
 ## Recovery and privacy
 
+**Thinking stops before an answer (v1.1.1):** reasoning models can exhaust a small response limit during reasoning. A 300-token limit may produce only the host's Thought block and no answer. The extension reports an empty/reasoning-only response explicitly and warns when a model named `thinking` or `reasoning` has a response limit below 1,024 tokens. Increase the host's response limit or select a non-thinking model, then regenerate. Increasing the limit can increase cost; the extension never changes it or retries automatically. Hiding reasoning does not guarantee that reasoning stops consuming tokens. See [NanoGPT's reasoning documentation](https://docs.nano-gpt.com/api-reference/miscellaneous/extended-thinking).
+
+Continue can now recover an existing assistant message with empty answer text when local override is enabled. It asks for the final reply, without adding empty-answer overlap or treating the previous reasoning as visible prose. Earlier conversation remains intact. Without local override, use Regenerate or enable the override. The host's separate reasoning display remains host-managed; Hide prefill only removes the matched template portion from answer text.
+
 Malformed, interrupted, and constraint-violating replies show a status message. Standard replies remain intact on validation failure. Streaming retains the safely decoded partial text (or plain refusal) and stores the raw output in `message.extra.structuredPrefillClean.raw` with an error. This recovery data is saved locally with the chat and may include hidden prefill text. Successful replies store only a validation flag, not a duplicate raw response.
 
 No telemetry, external code/CDN loading, arbitrary code execution, global networking patches, or credential collection. All model requests go through SillyTavern's existing services. Data you choose to send remains subject to your model provider's behavior.
@@ -123,7 +127,7 @@ node dev/server.mjs
 
 Open `http://127.0.0.1:8787` for the settings UI and simulated streamed/standard/Continue/recovery demos. The preview uses a fake host and makes no model API requests. It listens only on localhost and serves an explicit file allowlist.
 
-The 21 automated checks cover escaping, slots, exact integer intervals, exhaustive short-string ban comparisons, portable regex syntax, every streaming split of a JSON string, Unicode, guards, invalid settings, pass-through behavior, request isolation, stream state, swipe changes, Continue joining, generator success/failure, preset migration, and single initialization. Browser checks cover settings rendering and simulated reply handling. **These checks are not a live SillyTavern/provider certification:** test a short reply with your installed host version and chosen model before relying on the extension.
+The 23 automated checks cover escaping, slots, exact integer intervals, exhaustive short-string ban comparisons, portable regex syntax, every streaming split of a JSON string, Unicode, guards, invalid settings, pass-through behavior, request isolation, stream state, swipe changes, Continue joining, reasoning-only cutoff recovery, generator success/failure, preset migration, and single initialization. Browser checks cover settings rendering and simulated reply handling. **These checks are not a live SillyTavern/provider certification:** test a short reply with your installed host version and chosen model before relying on the extension.
 
 ## Reference code comparison (v1.1)
 

@@ -110,6 +110,9 @@ async function generatePrefix(messages, value) {
 }
 
 function finish(raw, request) {
+    if (!raw.trim()) throw new Error(request.lastState?.reasoning
+        ? 'Provider returned reasoning but no final answer. Increase the response token budget or use a non-thinking model, then regenerate or Continue with local override.'
+        : 'Provider returned no final answer. Check the response token budget, then regenerate or Continue with local override.');
     const value = readEnvelope(raw);
     request.compiled.validate(value);
     return request.compiled.display(value);
@@ -190,7 +193,7 @@ async function onRequest(data) {
     try {
         value = settings();
         const continuation = generation.type === 'continue' ? generation.base : '';
-        const options = { type: generation.type, continuation, names: names(), substitute: text => context().substituteParams(text) };
+        const options = { type: generation.type, continuation, hasContinuation: generation.hasAssistant, names: names(), substitute: text => context().substituteParams(text) };
         // Check capability/conflicts before a generator call or any request mutation.
         const probeValue = { ...value, prefill: value.prefill.replaceAll('[[pg]]', '') };
         const probeData = structuredClone(data);
@@ -236,7 +239,9 @@ async function onRequest(data) {
             if (active.type === 'continue') processor.continueMessage = active.base;
             attachStream(processor, pending);
         }
-        status(`Applied: JSON Schema prefix constraint (${request.compiled.settings.regexMode}).${request.compiled.settings.regexMode === 'portable' ? ' Continuation minimum is checked locally.' : ''}${generatorWarning}`);
+        const budgetWarning = /(?:thinking|reasoning)/i.test(data.model ?? '') && Number(data.max_completion_tokens ?? data.max_tokens) < 1024
+            ? ' Warning: this thinking model has a response limit below 1024 tokens and may stop before the final answer.' : '';
+        status(`Applied: JSON Schema prefix constraint (${request.compiled.settings.regexMode}).${request.compiled.settings.regexMode === 'portable' ? ' Continuation minimum is checked locally.' : ''}${budgetWarning}${generatorWarning}`);
     } catch (error) {
         if (error.name === 'AbortError') throw error;
         // Invalid settings never partially mutate the outgoing request.
@@ -374,7 +379,8 @@ async function initialize() {
         if (generation) generation.cancelled = true;
         const current = context();
         const last = current.chat.at(-1);
-        generation = { type, dryRun, api: current.mainApi, chatId: current.getCurrentChatId(), base: last && !last.is_user && !last.is_system ? last.mes : '' };
+        const hasAssistant = Boolean(last && !last.is_user && !last.is_system && typeof last.mes === 'string');
+        generation = { type, dryRun, api: current.mainApi, chatId: current.getCurrentChatId(), hasAssistant, base: hasAssistant ? last.mes : '' };
         pending = null;
     });
     listen(events.CHAT_COMPLETION_SETTINGS_READY, onRequest);
