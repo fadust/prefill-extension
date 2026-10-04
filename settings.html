@@ -1,0 +1,51 @@
+<div id="sp-clean" class="sp-clean">
+  <div class="inline-drawer">
+    <div class="inline-drawer-toggle inline-drawer-header"><b>StructuredPrefill clean</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+    <div class="inline-drawer-content">
+      <label class="checkbox_label"><input type="checkbox" data-setting="enabled"> Enabled</label>
+      <label class="checkbox_label"><input type="checkbox" data-setting="hide"> Hide prefill text in saved/displayed replies</label>
+      <label for="sp-status">Last status</label>
+      <output id="sp-status" role="status" aria-live="polite">Ready. Enable for a model with JSON Schema pattern support.</output>
+      <label class="checkbox_label"><input type="checkbox" data-setting="useOverride"> Use local override prefill</label>
+      <label for="sp-prefill">Override prefill text</label>
+      <textarea id="sp-prefill" class="text_pole" data-setting="prefill" rows="7" maxlength="4000" spellcheck="false"></textarea>
+      <label for="sp-minimum">Minimum characters after prefix</label>
+      <input id="sp-minimum" class="text_pole" type="number" data-setting="minimum" min="0" max="10000" step="1">
+      <label for="sp-newline">Newline token</label>
+      <input id="sp-newline" class="text_pole" data-setting="newline" maxlength="24" spellcheck="false">
+      <details>
+        <summary>Templates and Continue</summary>
+        <p class="sp-help">Use <code>[[keep]]</code> to keep text after the marker visible. Slots include <code>[[w:2-5]]</code>, <code>[[opt:yes|no]]</code>, <code>[[line]]</code>, <code>[[number:0-100]]</code>, and <code>[[end]]</code>.</p>
+        <label for="sp-overlap">Continue overlap (characters)</label>
+        <input id="sp-overlap" class="text_pole" type="number" data-setting="overlap" min="0" max="2000" step="1">
+        <label for="sp-banned">Banned phrases (one per line; ASCII case-insensitive)</label>
+        <textarea id="sp-banned" class="text_pole" data-setting="banned" rows="4" maxlength="2000"></textarea>
+        <p class="sp-help">Bans and line/word slots require regex lookahead support. Provider enforcement varies; violations are reported and the raw reply is retained for recovery.</p>
+        <label class="checkbox_label"><input type="checkbox" data-setting="customProvider"> Enable Custom/NanoGPT (my model supports JSON Schema patterns)</label>
+      </details>
+      <details>
+        <summary>Prefill generator: [[pg]]</summary>
+        <p class="sp-help">Optional extra request using your chosen SillyTavern connection profile. It sends the outgoing text conversation to that profile and may incur an extra API charge. It never switches your active connection.</p>
+        <label for="sp-profile">Generator connection profile</label>
+        <select id="sp-profile" class="text_pole" data-setting="generatorProfile"><option value="">Disabled</option></select>
+        <label for="sp-generator-prompt">Generator system prompt</label>
+        <textarea id="sp-generator-prompt" class="text_pole" data-setting="generatorPrompt" rows="3" maxlength="4000"></textarea>
+        <label for="sp-generator-tokens">Maximum generator tokens</label>
+        <input id="sp-generator-tokens" class="text_pole" type="number" data-setting="generatorTokens" min="1" max="256" step="1">
+        <label for="sp-generator-timeout">Generator timeout (milliseconds)</label>
+        <input id="sp-generator-timeout" class="text_pole" type="number" data-setting="generatorTimeout" min="1000" max="120000" step="1000">
+        <label for="sp-generator-stops">Stop strings (one per line)</label>
+        <textarea id="sp-generator-stops" class="text_pole" data-setting="generatorStops" rows="2"></textarea>
+      </details>
+      <details>
+        <summary>Local presets</summary>
+        <label for="sp-presets">Saved preset</label><select id="sp-presets" class="text_pole"><option value="">Choose a preset</option></select>
+        <label for="sp-preset-name">Preset name</label><input id="sp-preset-name" class="text_pole" maxlength="80">
+        <div class="sp-buttons"><button type="button" class="menu_button" data-action="save">Save</button><button type="button" class="menu_button" data-action="load">Load</button><button type="button" class="menu_button" data-action="delete">Delete</button><button type="button" class="menu_button" data-action="export">Export</button><button type="button" class="menu_button" data-action="import">Import</button></div>
+        <label for="sp-preset-json">Preset JSON (copy/paste to import or export)</label><textarea id="sp-preset-json" class="text_pole" rows="4" maxlength="20000" spellcheck="false"></textarea>
+      </details>
+      <div class="sp-buttons"><button type="button" class="menu_button" data-action="preview">Preview schema</button><button type="button" class="menu_button" data-action="reset">Reset settings</button></div>
+      <pre id="sp-preview" hidden></pre>
+    </div>
+  </div>
+</div>

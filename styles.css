@@ -1,0 +1,15 @@
+.sp-clean { --sp-accent: #52d8f4; }
+.sp-clean .inline-drawer-header { color: var(--sp-accent); }
+.sp-clean .inline-drawer-content { padding: 5px 0; }
+.sp-clean label:not(.checkbox_label) { display: block; color: var(--sp-accent); margin: 6px 0; }
+.sp-clean .checkbox_label { gap: 10px; margin: 5px 0; font-size: .85em; }
+.sp-clean .text_pole { display: block; width: 100%; margin: 0 0 6px; }
+.sp-clean textarea { resize: vertical; min-height: 55px; }
+.sp-clean textarea:focus-visible, .sp-clean input:focus-visible, .sp-clean select:focus-visible { outline: 1px solid var(--sp-accent); outline-offset: 1px; }
+.sp-clean output { display: block; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 50px; padding: 6px; margin: 8px 0 14px; border: 1px solid var(--SmartThemeBorderColor, #24243d); border-radius: 8px; background: var(--black30a, #090a15); }
+.sp-clean details { margin: 10px 0; border-top: 1px solid var(--SmartThemeBorderColor, #24243d); padding-top: 8px; }
+.sp-clean summary { cursor: pointer; color: var(--sp-accent); }
+.sp-clean .sp-help { font-size: .85em; opacity: .85; margin: 8px 0; }
+.sp-clean .sp-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.sp-clean button { width: auto; }
+.sp-clean pre { max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8em; }

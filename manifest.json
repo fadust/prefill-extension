@@ -1,0 +1,12 @@
+{
+  "display_name": "StructuredPrefill clean",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "styles.css",
+  "author": "fadust",
+  "version": "1.0.0",
+  "hooks": { "activate": "activate", "enable": "activate", "disable": "deactivate", "delete": "deactivate" },
+  "homePage": "https://github.com/fadust/prefill-extension"
+}
