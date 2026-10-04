@@ -83,7 +83,7 @@ test('host integration: Continue keeps the original text exactly once, including
     await emit(events.GENERATION_STARTED, 'continue', {}, false);
     await emit(events.CHAT_COMPLETION_SETTINGS_READY, data(true));
     assert.equal(p.continueMessage, base);
-    const raw = JSON.stringify({ value: [...base].slice(-6).join('') + ' and more' });
+    const raw = JSON.stringify({ value: 'private<NL>Ada: ' + [...base].slice(-6).join('') + ' and more' });
     p.generator = async function* () { yield { text: raw, state: {} }; };
     await p.onStartStreaming('...');
     for await (const chunk of p.generator()) ctx.chat[0].mes = p.continueMessage + chunk.text;
@@ -136,6 +136,25 @@ test('host integration: optional generator uses profile API, applies stop string
     assert.ok(fallback.json_schema);
     assert.equal(fallback.messages.some(x => x.content.includes('[[pg]]')), false);
     await emit(events.GENERATION_ENDED);
+});
+
+test('host integration: changing the active swipe cancels the stream without editing the selected reply', async () => {
+    enabled(); ctx.chat = []; const p = processor();
+    let stops = 0;
+    ctx.stopGeneration = () => { stops++; return true; };
+    await emit(events.GENERATION_STARTED, 'normal', {}, false);
+    await emit(events.CHAT_COMPLETION_SETTINGS_READY, data(true));
+    p.generator = async function* () {
+        yield { text: '{"value":"private<NL>Ada: start', state: {} };
+        ctx.chat[0].swipe_id = 1; ctx.chat[0].mes = 'Other selected swipe';
+        yield { text: '{"value":"private<NL>Ada: start more"}', state: {} };
+    };
+    await p.onStartStreaming('...');
+    for await (const chunk of p.generator()) ctx.chat[0].mes = chunk.text;
+    assert.equal(stops, 1); assert.equal(p.isStopped, true);
+    assert.equal(ctx.chat[0].mes, 'Other selected swipe');
+    await emit(events.GENERATION_ENDED);
+    assert.equal(ctx.chat[0].extra.structuredPrefillClean, undefined);
 });
 
 test('host integration: dry runs, tools, and incompatible streaming hooks stay unchanged', async () => {

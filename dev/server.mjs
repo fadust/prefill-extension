@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 const root = new URL('../', import.meta.url);
 const files = new Map([
     ['/', 'dev/preview.html'], ['/preview.js', 'dev/preview.js'],
-    ...['index.js', 'core.js', 'styles.css', 'settings.html'].map(name => [`/scripts/extensions/third-party/prefill-extension/${name}`, name]),
+    ...['index.js', 'core.js', 'bans.js', 'styles.css', 'settings.html'].map(name => [`/scripts/extensions/third-party/prefill-extension/${name}`, name]),
 ]);
 createServer(async (request, response) => {
     const file = files.get(new URL(request.url, 'http://127.0.0.1').pathname);

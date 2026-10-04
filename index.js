@@ -1,4 +1,4 @@
-import { DEFAULTS, normalizeSettings, compileTemplate, prepareRequest, readEnvelope, renderPartial } from './core.js';
+import { DEFAULTS, normalizeSettings, compileTemplate, prepareRequest, readEnvelope, renderPartial, renderPartialValue, EnvelopeStream, StreamGuard, applyStops, importPreset } from './core.js';
 
 const KEY = 'structuredPrefillClean';
 const context = () => SillyTavern.getContext();
@@ -7,6 +7,7 @@ let initializing;
 let generation = null;
 let pending = null;
 let generatorController = null;
+let commandsRegistered = false;
 const listeners = [];
 
 function status(text) {
@@ -57,21 +58,48 @@ function refreshProfiles() {
     select.value = selected;
 }
 
+function loadPreset(name) {
+    const preset = context().extensionSettings[KEY]?.presets?.find(x => x.name.toLowerCase() === name.trim().toLowerCase());
+    if (!preset) throw new Error('Choose an existing saved preset.');
+    setSettings({ ...preset.settings, enabled: false, generatorProfile: '' });
+    refreshProfiles(); renderSettings();
+    return preset.name;
+}
+
+function registerCommands() {
+    const ctx = context();
+    if (commandsRegistered || !ctx.SlashCommandParser || !ctx.SlashCommand || !ctx.SlashCommandArgument || !ctx.ARGUMENT_TYPE) return;
+    ctx.SlashCommandParser.addCommandObject(ctx.SlashCommand.fromProps({
+        name: 'sp-clean-preset',
+        callback: (_args, name) => panel ? loadPreset(String(name)) : '',
+        unnamedArgumentList: [ctx.SlashCommandArgument.fromProps({ description: 'Saved clean preset name', typeList: [ctx.ARGUMENT_TYPE.STRING], isRequired: true })],
+        helpString: 'Load a StructuredPrefill clean preset by name. Starts disabled and clears the generator profile.',
+    }));
+    ctx.SlashCommandParser.addCommandObject(ctx.SlashCommand.fromProps({
+        name: 'sp-clean-preset-list', callback: () => JSON.stringify(panel ? (ctx.extensionSettings[KEY]?.presets ?? []).map(preset => preset.name) : []),
+        helpString: 'List saved StructuredPrefill clean preset names as JSON.',
+    }));
+    commandsRegistered = true;
+}
+
 async function generatePrefix(messages, value) {
     if (!value.generatorProfile || !context().ConnectionManagerRequestService) throw new Error('Choose an available generator connection profile.');
     generatorController = new AbortController();
     const timer = setTimeout(() => generatorController?.abort(), value.generatorTimeout);
     try {
         const textMessages = messages.map(message => ({ role: message.role, content: typeof message.content === 'string' ? message.content : (Array.isArray(message.content) ? message.content.filter(x => x.type === 'text').map(x => x.text).join('\n') : '') })).filter(x => ['user', 'assistant', 'system'].includes(x.role));
-        textMessages.unshift({ role: 'system', content: context().substituteParams(value.generatorPrompt) });
+        if (textMessages.at(-1)?.role === 'assistant') textMessages.push({ role: 'user', content: 'Write a short opening for the next assistant reply.' });
+        const prompt = { role: value.generatorRole, content: context().substituteParams(value.generatorPrompt) };
+        if (value.generatorRole === 'system') textMessages.unshift(prompt);
+        else if (value.generatorRole === 'user') textMessages.push(prompt);
+        else textMessages.splice(Math.max(0, textMessages.length - 1), 0, prompt);
+        const stops = value.generatorStops.split(/\r?\n/).filter(Boolean);
         const result = await context().ConnectionManagerRequestService.sendRequest(value.generatorProfile, textMessages, value.generatorTokens,
-            { stream: false, signal: generatorController.signal, extractData: true, includePreset: false });
+            { stream: false, signal: generatorController.signal, extractData: true, includePreset: false },
+            { ...(stops.length ? { stop: stops } : {}), include_reasoning: false, enable_web_search: false, request_images: false });
         let text = result?.content;
         if (typeof text !== 'string') throw new Error('Generator returned no text.');
-        for (const stop of value.generatorStops.split(/\r?\n/).filter(Boolean)) {
-            const index = text.indexOf(stop);
-            if (index >= 0) text = text.slice(0, index);
-        }
+        text = applyStops(text, stops, value.generatorKeepStop);
         if (text.length > 2000) throw new Error('Generator output exceeds 2000 characters.');
         if (text.includes('[[')) throw new Error('Generator returned template markers instead of plain text.');
         return text;
@@ -96,13 +124,32 @@ function attachStream(processor, request) {
         const originalGenerator = processor.generator;
         processor.generator = async function* () {
             let raw = '';
+            const decoder = new EnvelopeStream();
+            const guard = new StreamGuard(request.compiled.settings.streamGuard);
             try {
                 for await (const chunk of originalGenerator()) {
+                    const current = context();
+                    const message = current.chat[processor.messageId];
+                    if (current.getCurrentChatId() !== request.chatId || message !== request.messageRef || message.swipe_id !== request.swipeId) {
+                        request.error = 'Chat or active swipe changed during the structured reply.';
+                        processor.isStopped = true;
+                        if (current.streamingProcessor === processor) current.stopGeneration?.();
+                        status(`Stopped: ${request.error}`);
+                        return;
+                    }
                     raw = chunk.text ?? '';
                     request.raw = raw;
                     let text = '';
-                    try { text = renderPartial(raw, request.compiled); }
+                    let decoded = '';
+                    try { decoded = decoder.push(raw); text = renderPartialValue(decoded, request.compiled); }
                     catch { /* Wait for full JSON; an incomplete response is preserved below. */ }
+                    const issue = guard.check(raw.length, decoded);
+                    if (issue) {
+                        request.error = issue;
+                        processor.isStopped = true;
+                        if (context().streamingProcessor === processor) context().stopGeneration?.();
+                        throw new Error(issue);
+                    }
                     yield { ...chunk, text };
                 }
                 const text = finish(raw, request);
@@ -125,7 +172,10 @@ function attachStream(processor, request) {
                 yield chunk;
             }
         };
-        return originalStart.apply(this, args);
+        const messageId = await originalStart.apply(this, args);
+        request.messageRef = context().chat[messageId];
+        request.swipeId = request.messageRef?.swipe_id;
+        return messageId;
     };
 }
 
@@ -144,25 +194,28 @@ async function onRequest(data) {
         // Check capability/conflicts before a generator call or any request mutation.
         const probeValue = { ...value, prefill: value.prefill.replaceAll('[[pg]]', '') };
         const probeData = structuredClone(data);
-        if (!value.useOverride && typeof probeData.messages?.at(-1)?.content === 'string') {
-            probeData.messages.at(-1).content = probeData.messages.at(-1).content.replaceAll('[[pg]]', '');
+        let tailIndex = (data.messages?.length ?? 0) - 1;
+        while (tailIndex >= 0 && data.messages[tailIndex]?.role === 'system') tailIndex--;
+        if (!value.useOverride && typeof probeData.messages?.[tailIndex]?.content === 'string') {
+            probeData.messages[tailIndex].content = probeData.messages[tailIndex].content.replaceAll('[[pg]]', '');
         }
         const probe = prepareRequest(probeData, probeValue, options);
         if (probe.skipped) { status(`Skipped: ${probe.skipped}.`); return; }
         let generatorWarning = '';
-        let template = value.useOverride ? context().substituteParams(value.prefill) : data.messages.at(-1)?.content;
+        let template = value.useOverride ? context().substituteParams(value.prefill) : data.messages?.[tailIndex]?.content;
         let requestData = data;
         if (generation.type !== 'continue' && template?.includes('[[pg]]')) {
             status('Generating optional prefill with selected connection profile…');
             let prefix = '';
-            try { prefix = await generatePrefix(data.messages, value); }
+            const generatorMessages = data.messages.filter((_, i) => !(i === tailIndex && data.messages[i]?.role === 'assistant'));
+            try { prefix = await generatePrefix(generatorMessages, value); }
             catch (error) { generatorWarning = ` Generator unavailable: ${error.message}; [[pg]] became empty.`; }
             // A chat change or stop cancels the main request, rather than targeting a different chat.
             if (generation !== active || active.cancelled) throw new DOMException('Generation cancelled.', 'AbortError');
             template = template.replaceAll('[[pg]]', prefix);
             if (!value.useOverride) {
                 requestData = structuredClone(data);
-                requestData.messages.pop();
+                requestData.messages.splice(tailIndex, 1);
             }
             value = { ...value, useOverride: true, prefill: template };
             // Keep this fully resolved template literal in place of macro substitution.
@@ -183,7 +236,7 @@ async function onRequest(data) {
             if (active.type === 'continue') processor.continueMessage = active.base;
             attachStream(processor, pending);
         }
-        status(`Applied: JSON Schema prefix constraint.${generatorWarning}`);
+        status(`Applied: JSON Schema prefix constraint (${request.compiled.settings.regexMode}).${request.compiled.settings.regexMode === 'portable' ? ' Continuation minimum is checked locally.' : ''}${generatorWarning}`);
     } catch (error) {
         if (error.name === 'AbortError') throw error;
         // Invalid settings never partially mutate the outgoing request.
@@ -198,6 +251,11 @@ async function onReply(messageId) {
     if (messageId !== (request.stream ? request.processor.messageId : request.targetId)) return;
     const message = ctx.chat[messageId];
     if (!message || message.is_user || message.is_system) return;
+    if (request.stream && (message !== request.messageRef || message.swipe_id !== request.swipeId)) {
+        pending = null;
+        status('Stopped: reply target changed; selected message was left intact.');
+        return;
+    }
     message.extra ??= {};
     if (request.stream) {
         message.extra[KEY] = { validated: request.complete, ...(request.complete ? {} : { raw: request.raw, error: request.error ?? 'Generation interrupted before complete JSON.' }) };
@@ -261,6 +319,7 @@ async function initialize() {
     panel = target.querySelector('#sp-clean');
     refreshProfiles();
     renderSettings();
+    registerCommands();
     status(settings().enabled ? 'Ready. Waiting for a compatible generation.' : 'Skipped: extension is disabled.');
     panel.addEventListener('input', event => {
         if (!event.target.dataset.setting) return;
@@ -284,9 +343,9 @@ async function initialize() {
             else if (action === 'export') json.value = JSON.stringify({ version: 1, settings: readSettings() }, null, 2);
             else if (action === 'import') {
                 const data = JSON.parse(json.value);
-                if (data.version !== 1 || !data.settings) throw new Error('Expected version 1 preset JSON.');
                 // Imported presets cannot auto-enable the extension or extra API requests.
-                setSettings({ ...normalizeSettings(data.settings), enabled: false, generatorProfile: '' });
+                setSettings(importPreset(data));
+                if (typeof data.name === 'string') panel.querySelector('#sp-preset-name').value = data.name.slice(0, 80);
                 refreshProfiles(); renderSettings();
             } else if (action === 'save') {
                 if (!name) throw new Error('Enter a preset name.');
@@ -295,10 +354,13 @@ async function initialize() {
                 store.presets = [...presets.filter(x => x.name !== name), { name, settings: readSettings() }];
                 context().saveSettingsDebounced(); renderSettings(); select.value = name;
             } else if (action === 'load') {
+                loadPreset(select.value);
+            } else if (action === 'rename') {
                 const preset = store.presets?.find(x => x.name === select.value);
-                if (!preset) throw new Error('Choose a saved preset.');
-                setSettings({ ...preset.settings, enabled: false, generatorProfile: '' });
-                refreshProfiles(); renderSettings();
+                if (!preset || !name) throw new Error('Choose a preset and enter its new name.');
+                if (store.presets.some(x => x !== preset && x.name.toLowerCase() === name.toLowerCase())) throw new Error('That preset name already exists.');
+                preset.name = name;
+                context().saveSettingsDebounced(); renderSettings(); select.value = name;
             } else if (action === 'delete') {
                 store.presets = (store.presets ?? []).filter(x => x.name !== select.value);
                 context().saveSettingsDebounced(); renderSettings();
@@ -324,7 +386,7 @@ async function initialize() {
         if (pending?.stream && pending.processor.messageId >= 0) await onReply(pending.processor.messageId);
     });
     listen(events.CHAT_CHANGED, () => { generation = null; pending = null; generatorController?.abort(); });
-    for (const event of [events.CONNECTION_PROFILE_CREATED, events.CONNECTION_PROFILE_UPDATED, events.CONNECTION_PROFILE_DELETED]) listen(event, refreshProfiles);
+    for (const event of [events.CONNECTION_PROFILE_LOADED, events.CONNECTION_PROFILE_CREATED, events.CONNECTION_PROFILE_UPDATED, events.CONNECTION_PROFILE_DELETED]) listen(event, refreshProfiles);
 }
 
 // Legacy ST versions initialize extensions by executing their entry script;

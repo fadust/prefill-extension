@@ -36,9 +36,9 @@ async function demo(type, stream, invalid = false) {
     if (!data.json_schema) { result.textContent = 'No schema applied. Enable the extension to run this demo.'; await emit(eventTypes.GENERATION_ENDED); return; }
     const text = ' and the room fell quiet. She checked the old lamp, found the loose switch, and smiled as the warm glow returned.';
     const config = ctx.extensionSettings.structuredPrefillClean;
-    const prefix = ctx.substituteParams(config.prefill).replaceAll('[[keep]]', '').replaceAll('\n', config.newline);
+    const prefix = ctx.substituteParams(config.prefill).replace(/\[\[(?:keep|pg|end|stop|eos)\]\]/g, '').replaceAll('\n', config.newline);
     const overlap = config.overlap ? [...base].slice(-config.overlap).join('') : '';
-    const value = type === 'continue' ? overlap + text : prefix + 'Welcome. I found the note you left by the door, and I brought the map. Shall we start with the northern trail?';
+    const value = type === 'continue' ? prefix + overlap + text : prefix + 'Welcome. I found the note you left by the door, and I brought the map. Shall we start with the northern trail?';
     const raw = invalid ? 'This provider returned plain text instead of JSON.' : JSON.stringify({ value });
     if (stream) {
         processor.generator = async function* () { for (let i = 1; i <= raw.length; i += 3) yield { text: raw.slice(0, i), state: {} }; yield { text: raw, state: {} }; };

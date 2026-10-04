@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compileTemplate, normalizeSettings, prepareRequest, readEnvelope, renderPartial } from '../core.js';
+import { compileTemplate, normalizeSettings, prepareRequest, readEnvelope, renderPartial, renderPartialValue, EnvelopeStream, StreamGuard, applyStops, importPreset } from '../core.js';
+import { portableBanPattern } from '../bans.js';
 
 test('literal prefixes, macros, keep marker, and minimum continuation', () => {
     const c = compileTemplate('private note\n[[keep]]Ada: ', { minimum: 3 });
@@ -49,9 +50,11 @@ test('strict JSON envelope and every possible streaming boundary', () => {
     const c = compileTemplate('hidden\n[[keep]]Ada: ', { minimum: 0 });
     const value = 'hidden<NL>Ada: "hi"\\path<NL>emoji 😀\ttab';
     const raw = JSON.stringify({ value });
+    const decoder = new EnvelopeStream();
     assert.equal(readEnvelope(raw), value);
     for (let i = 0; i <= raw.length; i++) {
         const visible = renderPartial(raw.slice(0, i), c);
+        assert.equal(renderPartialValue(decoder.push(raw.slice(0, i)), c), visible);
         assert.ok('Ada: "hi"\\path\nemoji 😀\ttab'.startsWith(visible), `${i}: ${visible}`);
         assert.ok(!visible.includes('<NL>'));
     }
@@ -62,9 +65,87 @@ test('strict JSON envelope and every possible streaming boundary', () => {
     assert.throws(() => readEnvelope('x'.repeat(1_000_001), true));
 });
 
+test('incremental Unicode escape splits and stream guard stop only known runaway states', () => {
+    const raw = '{"value":"\\u0041\\uD83D\\uDE00\\nnext"}';
+    const decoder = new EnvelopeStream();
+    for (let i = 0; i <= raw.length; i++) assert.equal(decoder.push(raw.slice(0, i)), readEnvelope(raw.slice(0, i), true));
+    const guard = new StreamGuard();
+    assert.equal(guard.check(0, '', 0), '');
+    assert.equal(guard.check(5001, '', 14000), '');
+    assert.match(guard.check(6000, '', 16000), /stalled/);
+    assert.match(new StreamGuard().check(3000, ' '.repeat(2048), 0), /padding/);
+    assert.match(new StreamGuard(false).check(1_000_001, '', 0), /1 MB/);
+    assert.equal(new StreamGuard(false).check(5000, ' '.repeat(2048), 0), '');
+});
+
 test('invalid settings and templates never become schemas', () => {
     for (const options of [{ minimum: -1 }, { minimum: 1.2 }, { newline: '' }, { newline: '\n' }, { overlap: 2001 }]) assert.throws(() => normalizeSettings(options));
-    for (const template of ['[[unknown]]', '[[keep]][[keep]]', '[[end]]tail', '[[w:0]]', '[[open', 'literal<NL>']) assert.throws(() => compileTemplate(template));
+    for (const template of ['[[unknown]]', '[[keep]][[keep]]', '[[end]]tail', '[[w:0]]', '[[open']) assert.throws(() => compileTemplate(template));
+});
+
+test('portable ban DFA handles overlaps, partial endings, literals, and case folding', () => {
+    for (const phrases of [['aba'], ['aa'], ['ab', 'ba'], ['a.b', '—']]) {
+        const regex = new RegExp(`^(?:${portableBanPattern(phrases)})$`, 'u');
+        let strings = [''];
+        for (let length = 0; length <= 6; length++) {
+            for (const text of strings) assert.equal(regex.test(text), !phrases.some(phrase => text.toLowerCase().includes(phrase)), `${phrases}: ${text}`);
+            strings = strings.flatMap(text => ['a', 'b', 'A', '!'].map(char => text + char));
+        }
+    }
+    const regex = new RegExp(`^(?:${portableBanPattern(['aba'])})$`, 'u');
+    assert.ok(regex.test('a')); assert.ok(regex.test('ab')); assert.ok(!regex.test('aaba'));
+});
+
+test('portable schemas keep exact choices/counts/ranges, avoid lookaheads, and check minimum locally', () => {
+    const c = compileTemplate('[[keep]]Éva: [[w:2-3]] | [[number:0-100]] | ', { regexMode: 'portable', banned: 'aba', minimum: 3 });
+    const pattern = c.schema.value.properties.value.pattern;
+    assert.ok(!pattern.includes('(?=') && !pattern.includes('(?!') && !pattern.includes('\\s') && !pattern.includes('\\S'));
+    assert.ok(!/[{}]/.test(pattern));
+    assert.ok(/^[\x00-\x7f]*$/.test(pattern));
+    c.validate('Éva: one two | 99 | safe');
+    assert.throws(() => c.validate('Éva: one | 99 | safe'));
+    assert.throws(() => c.validate('Éva: one two | 101 | safe'));
+    assert.throws(() => c.validate('Éva: one two | 99 | aaba'));
+    assert.throws(() => c.validate('Éva: one two | 99 | hi'));
+    const emoji = compileTemplate('[[keep]]', { regexMode: 'portable', banned: '😀', minimum: 0 });
+    emoji.validate('good 😁'); assert.throws(() => emoji.validate('bad 😀'));
+    const words = compileTemplate('[[words:2]][[end]]', { regexMode: 'portable' });
+    words.validate('hello, friend'); assert.throws(() => words.validate('hello,friend'));
+});
+
+test('newline collisions are resolved and token or actual newline replies validate', () => {
+    const c = compileTemplate('Literal <NL>\n[[keep]]Ada: ', { minimum: 0 });
+    assert.equal(c.settings.newline, '<NL2>');
+    c.validate('Literal <NL><NL2>Ada: hello');
+    c.validate('Literal <NL>\nAda: hello');
+    assert.equal(c.display('Literal <NL>\nAda: hello'), 'Ada: hello');
+});
+
+test('reference aliases, slot hints, preset import, and generator stop retention', () => {
+    const c = compileTemplate('[[options: yes, no |hint: choose]] [[regex:[A-Z]{2}]] [[words:2 |hint: short]][[end]]', { hide: false });
+    c.validate('yes AB two words');
+    const imported = importPreset({ name: 'Old', override_prefill_enabled: true, override_prefill_text: 'Ada: ', min_chars_after_prefix: 5, prefill_gen_profile_id: 'never-auto-use', prefill_gen_enabled: true });
+    assert.equal(imported.prefill, 'Ada: '); assert.equal(imported.minimum, 5); assert.equal(imported.enabled, false); assert.equal(imported.generatorProfile, '');
+    assert.throws(() => importPreset({ override_prefill_text: 'x', prefill_gen_max_tokens: 999999999 }));
+    assert.equal(applyStops('oneSTOPtwoEND', ['END', 'STOP']), 'one');
+    assert.equal(applyStops('oneSTOPtwoEND', ['END', 'STOP'], true), 'oneSTOP');
+});
+
+test('system-suffix prefills, override replacement, background request isolation, and PM Continue', () => {
+    const input = { ...request(), type: 'normal' };
+    input.messages.push({ role: 'system', content: 'post history instructions' });
+    const result = prepareRequest(input, { enabled: true, useOverride: false, minimum: 0 });
+    assert.ok(result.compiled); assert.equal(result.messages[1].role, 'system');
+    const override = prepareRequest(input, { enabled: true, prefill: 'new prefix', minimum: 0 });
+    assert.equal(override.messages.some(x => x.role === 'assistant'), false);
+    assert.ok(prepareRequest({ ...input, type: 'quiet' }, { enabled: true }, { type: 'normal' }).skipped);
+    const base = 'original saved reply';
+    const continuation = { ...request(), type: 'continue' };
+    continuation.messages.at(-1).content = 'PM prefix\n\n' + base;
+    continuation.messages.push({ role: 'system', content: 'continue nudge' });
+    const continued = prepareRequest(continuation, { enabled: true, minimum: 0 }, { type: 'continue', continuation: base });
+    assert.equal(continued.messages[1].content, base);
+    assert.equal(continuation.messages[1].content, 'PM prefix\n\n' + base);
 });
 
 const request = () => ({ chat_completion_source: 'openrouter', messages: [{ role: 'user', content: 'Hi' }, { role: 'assistant', content: 'Ada: ' }], stream: true, n: 1 });
@@ -91,11 +172,11 @@ test('continue repeats only a literal Unicode overlap and hides it without trunc
     const base = 'previous [[keep]] text 😀';
     const input = request();
     input.messages.at(-1).content = base;
-    const result = prepareRequest(input, { enabled: true, overlap: 10, minimum: 0 }, { type: 'continue', continuation: base });
+    const result = prepareRequest(input, { enabled: true, useOverride: false, overlap: 10, minimum: 0 }, { type: 'continue', continuation: base });
     const overlap = [...base].slice(-10).join('');
     result.compiled.validate(overlap + 'continued');
     assert.equal(result.compiled.display(overlap + 'continued'), 'continued');
     assert.equal(result.messages[1].content, base);
-    const zero = prepareRequest(input, { enabled: true, overlap: 0, minimum: 0 }, { type: 'continue', continuation: base });
+    const zero = prepareRequest(input, { enabled: true, useOverride: false, overlap: 0, minimum: 0 }, { type: 'continue', continuation: base });
     assert.equal(zero.compiled.display('continued'), 'continued');
 });

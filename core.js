@@ -1,13 +1,15 @@
+import { portableBanPattern } from './bans.js';
 // Original implementation. This module has no host, DOM, or network dependencies.
 export const DEFAULTS = Object.freeze({
     enabled: false, hide: true, useOverride: true, prefill: '[[keep]]\n{{char}}: ',
-    minimum: 80, newline: '<NL>', overlap: 80, banned: '', customProvider: false,
+    minimum: 80, newline: '<NL>', overlap: 80, banned: '', customProvider: false, regexMode: 'auto', streamGuard: true,
     generatorProfile: '', generatorTokens: 24, generatorTimeout: 15000,
-    generatorStops: '', generatorPrompt: 'Write a short opening for the next assistant reply. Return only the opening text.',
+    generatorStops: '', generatorKeepStop: false, generatorRole: 'system', generatorPrompt: 'Write a short opening for the next assistant reply. Return only the opening text.',
 });
 const MAX_TEMPLATE = 4000;
 const MAX_PATTERN = 16000;
-const ANY = '[\\s\\S]';
+const ANY = '(?:.|\\n|\\r|\\u2028|\\u2029)';
+const SPACE = '\\t \\r\\n\\f\\v\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000\\uFEFF';
 const emotions = 'happy|sad|angry|afraid|nervous|excited|calm|curious|confused|surprised|relieved|hopeful|worried|proud|ashamed|embarrassed|flustered|lonely|grateful|jealous|tired|bored|amused|frustrated|disappointed|content|anxious|determined|playful|serious|loving|hurt|eager|shy|confident|uncertain|suspicious|nostalgic|peaceful|restless|overwhelmed|optimistic|pessimistic|irritated|delighted|miserable|terrified|tender|defiant|neutral';
 
 export function escapeRegex(text) {
@@ -33,6 +35,8 @@ export function normalizeSettings(input = {}) {
     result.overlap = integer(result.overlap, 0, 2000, 'Overlap');
     result.generatorTokens = integer(result.generatorTokens, 1, 256, 'Generator tokens');
     result.generatorTimeout = integer(result.generatorTimeout, 1000, 120000, 'Generator timeout');
+    if (!['auto', 'standard', 'portable'].includes(result.regexMode)) throw new Error('Regex mode must be auto, standard, or portable.');
+    if (!['system', 'user', 'assistant'].includes(result.generatorRole)) throw new Error('Generator prompt role must be system, user, or assistant.');
     if (result.prefill.length > MAX_TEMPLATE) throw new Error('Prefill exceeds 4000 characters.');
     if (result.banned.length > 2000) throw new Error('Banned phrases exceed 2000 characters.');
     if (result.generatorPrompt.length > MAX_TEMPLATE) throw new Error('Generator prompt exceeds 4000 characters.');
@@ -43,24 +47,24 @@ export function normalizeSettings(input = {}) {
 }
 
 // Exact decimal intervals, including large ranges; no enumeration of every number.
-function positiveRange(low, high) {
+function positiveRange(low, high, portable = false) {
     const parts = [];
     while (low <= high) {
         let digits = 0;
         while (digits < 9 && low % (10 ** (digits + 1)) === 0 && low + 10 ** (digits + 1) - 1 <= high && low !== 0) digits++;
         const step = 10 ** digits;
-        parts.push(digits ? `${String(low).slice(0, -digits)}[0-9]{${digits}}` : String(low));
+        parts.push(digits ? `${String(low).slice(0, -digits)}${portable ? '[0-9]'.repeat(digits) : `[0-9]{${digits}}`}` : String(low));
         low += step;
     }
     return parts;
 }
 
-function numberRange(low, high) {
+function numberRange(low, high, portable) {
     integer(low, -1e9, 1e9, 'Number lower bound');
     integer(high, low, 1e9, 'Number upper bound');
     const parts = [];
-    if (low < 0) parts.push(`-(?:${positiveRange(Math.max(1, -high), -low).join('|')})`);
-    if (high >= 0) parts.push(...positiveRange(Math.max(0, low), high));
+    if (low < 0) parts.push(`-(?:${positiveRange(Math.max(1, -high), -low, portable).join('|')})`);
+    if (high >= 0) parts.push(...positiveRange(Math.max(0, low), high, portable));
     return `(?:${parts.join('|')})`;
 }
 
@@ -94,36 +98,44 @@ function customRegex(input) {
     return `(?:${pattern})`;
 }
 
-function slotPattern(slot, newline, names) {
+function slotPattern(slot, newline, names, portable) {
+    slot = slot.split(/\|hint:/i)[0].trim();
     const colon = slot.indexOf(':');
-    const kind = (colon < 0 ? slot : slot.slice(0, colon)).toLowerCase();
-    const arg = colon < 0 ? '' : slot.slice(colon + 1);
-    const oneLine = `(?:(?!${escapeRegex(newline)})[^\\r\\n])`;
-    const word = `(?:(?!${escapeRegex(newline)})[^\\s"*])`;
-    const words = (low, high) => `${word}+(?:[ \\t]+${word}+){${low - 1},${high - 1}}`;
+    const kind = (colon < 0 ? slot : slot.slice(0, colon)).trim().toLowerCase();
+    const arg = colon < 0 ? '' : slot.slice(colon + 1).trim();
+    const forbidden = newline[0].replace(/[\\\]\[\^\-]/g, '\\$&');
+    const oneLine = portable ? `[^\\r\\n${forbidden}]` : `(?:(?!${escapeRegex(newline)})[^\\r\\n])`;
+    const word = portable ? `[^${SPACE},<>"*${forbidden}]` : `(?:(?!${escapeRegex(newline)})[^\\s,"*])`;
+    const repeat = (atom, low, high) => portable ? atom.repeat(low) + `(?:${atom})?`.repeat(high - low) : `(?:${atom}){${low},${high}}`;
+    const wordToken = `${word}+[,]*`;
+    const words = (low, high) => `${wordToken}${repeat(`[ \\t]+${wordToken}`, low - 1, high - 1)}`;
     switch (kind) {
         case 'w': case 'words': return words(...countRange(arg));
-        case 'opt': {
-            const options = arg.split('|');
+        case 'opt': case 'options': {
+            const options = [...new Set(arg.split(/[|,]/).map(x => x.trim()))];
             if (options.some(x => !x) || options.length > 50) throw new Error('Options require 1–50 non-empty choices.');
             return `(?:${options.map(escapeRegex).join('|')})`;
         }
-        case 're': return customRegex(arg);
+        case 're': case 'regex': {
+            const result = customRegex(arg);
+            if (portable && /\\[sS]|\{/.test(result)) throw new Error('Portable custom regex cannot use shorthand whitespace classes or brace quantifiers.');
+            return result;
+        }
         case 'free': return `${ANY}+?`;
         case 'emotion': case 'mood': return `(?:${emotions})`;
         case 'line': return `${oneLine}+`;
         case 'lines': {
             const [low, high] = countRange(arg, 20);
-            return `${oneLine}+(?:${escapeRegex(newline)}${oneLine}+){${low - 1},${high - 1}}`;
+            return `${oneLine}+${repeat(`(?:${escapeRegex(newline)}|\\n)${oneLine}+`, low - 1, high - 1)}`;
         }
-        case 'name': return names.length ? `(?:${names.map(escapeRegex).join('|')})` : '[A-Z][a-z]{1,30}(?: [A-Z][a-z]{1,30}){0,3}';
+        case 'name': return names.length ? `(?:${names.map(escapeRegex).join('|')})` : `[A-Z]${repeat('[a-z]', 1, 30)}${repeat(` [A-Z]${repeat('[a-z]', 1, 30)}`, 0, 3)}`;
         case 'action': return words(1, 6);
         case 'thought': return words(1, 10);
         case 'num': return '-?(?:0|[1-9][0-9]*)';
         case 'number': {
             const range = /^(-?\d+)-(-?\d+)$/.exec(arg);
             if (!range) throw new Error('Number slot requires a range such as [[number:-10-100]].');
-            return numberRange(Number(range[1]), Number(range[2]));
+            return numberRange(Number(range[1]), Number(range[2]), portable);
         }
         case 'pg': throw new Error('Prefill generator did not resolve [[pg]].');
         default: throw new Error(`Unknown slot [[${slot}]].`);
@@ -132,9 +144,13 @@ function slotPattern(slot, newline, names) {
 
 export function compileTemplate(template, options = {}) {
     const settings = normalizeSettings(options);
+    const portable = settings.regexMode === 'portable';
     if (typeof template !== 'string' || template.length > MAX_TEMPLATE) throw new Error('Template must be at most 4000 characters.');
     template = template.replace(/\r\n?/g, '\n');
-    if (template.includes(settings.newline)) throw new Error('Newline token occurs in the template; choose a different token.');
+    if (template.includes(settings.newline)) {
+        settings.newline = Array.from({ length: 99 }, (_, i) => `<NL${i + 2}>`).find(token => !template.includes(token));
+        if (!settings.newline) throw new Error('Cannot find an unused newline token.');
+    }
     const names = [...new Set((options.names ?? []).filter(x => typeof x === 'string' && x.length > 0 && x.length <= 100))].slice(0, 50);
     const encode = text => text.replaceAll('\n', settings.newline);
     let pattern = '', hiddenPattern = null, cursor = 0, ended = false, slots = 0, freeSlots = 0, previousSlot = false;
@@ -152,7 +168,7 @@ export function compileTemplate(template, options = {}) {
             if (++slots > 32) throw new Error('Use at most 32 template slots.');
             if (previousSlot && !literal) throw new Error('Separate value slots with literal text.');
             if (slot === 'free' && ++freeSlots > 1) throw new Error('Use at most one free-text slot.');
-            pattern += slotPattern(match[1], settings.newline, names);
+            pattern += slotPattern(match[1], settings.newline, names, portable);
             previousSlot = true;
         }
         cursor = match.index + match[0].length;
@@ -161,19 +177,25 @@ export function compileTemplate(template, options = {}) {
     if (!options.literal && tail.includes('[[')) throw new Error('Unclosed template slot.');
     if (ended && tail) throw new Error('End slot must be the last item in the template.');
     pattern += escapeRegex(encode(tail));
+    if (options.literalSuffix) pattern += escapeRegex(encode(options.literalSuffix.replace(/\r\n?/g, '\n')));
+    // Accept either encoded tokens or actual decoded newlines without modifying
+    // the literal text. Some providers prefer JSON \n escapes despite the hint.
+    pattern = pattern.split(escapeRegex(settings.newline)).join(`(?:${escapeRegex(settings.newline)}|\\n)`);
+    if (hiddenPattern !== null) hiddenPattern = hiddenPattern.split(escapeRegex(settings.newline)).join(`(?:${escapeRegex(settings.newline)}|\\n)`);
     const prefix = pattern;
     const phrases = [...new Set(settings.banned.split(/\r?\n/).map(x => x.trim()).filter(Boolean))];
     if (phrases.length > 30 || phrases.some(x => x.length > 80)) throw new Error('Use at most 30 banned phrases, at most 80 characters each.');
     // ASCII case folding avoids flags (which JSON Schema does not carry).
     const ban = phrases.map(phrase => [...encode(phrase)].map(char => /[a-z]/i.test(char) ? `[${char.toLowerCase()}${char.toUpperCase()}]` : escapeRegex(char)).join('')).join('|');
-    const fullPattern = `^${ban ? `(?!${ANY}*(?:${ban}))` : ''}(?:${prefix})${ended ? '' : `${ANY}{${settings.minimum},}`}$`;
+    let fullPattern = `^${ban && !portable ? `(?!${ANY}*(?:${ban}))` : ''}(?:${prefix})${ended ? '' : portable ? `(?:${phrases.length ? portableBanPattern(phrases) : `${ANY}*`})` : `${ANY}{${settings.minimum},}`}$`;
+    if (portable) fullPattern = fullPattern.replace(/[^\x00-\x7f]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
     if (fullPattern.length > MAX_PATTERN) throw new Error('Schema pattern exceeds 16000 characters; simplify the template.');
     const fullRegex = new RegExp(fullPattern, 'u');
     const prefixRegex = new RegExp(`^(?:${prefix})`, 'u');
     const hiddenRegex = new RegExp(`^(?:${hiddenPattern ?? prefix})`, 'u');
     return {
         schema: { name: 'structured_prefill_clean', strict: true, value: {
-            type: 'object', properties: { value: { type: 'string', pattern: fullPattern } },
+            type: 'object', properties: { value: { type: 'string', pattern: fullPattern, ...(portable && !ended ? { minLength: settings.minimum } : {}) } },
             required: ['value'], additionalProperties: false,
         } },
         settings, ended, prefixRegex, hiddenRegex, fullRegex,
@@ -181,6 +203,8 @@ export function compileTemplate(template, options = {}) {
         validate(value) {
             const match = fullRegex.exec(value);
             if (!match || match[0] !== value) throw new Error('Provider output did not match the template or banned-phrase constraints.');
+            const fold = text => text.replace(/[A-Z]/g, char => char.toLowerCase());
+            if (phrases.some(phrase => fold(this.decode(value)).includes(fold(phrase)))) throw new Error('Provider output contained a banned phrase.');
             const prefixMatch = prefixRegex.exec(value);
             if (!ended && [...this.decode(value.slice(prefixMatch[0].length))].length < settings.minimum) {
                 throw new Error('Provider output was shorter than the minimum continuation length.');
@@ -234,9 +258,10 @@ export function readEnvelope(raw, partial = false) {
 }
 
 export function renderPartial(raw, compiled) {
-    // ponytail: cumulative chunks are reparsed, capped at 1 MB; use an incremental
-    // decoder if profiling long streamed replies shows this dominates rendering.
-    let value = readEnvelope(raw, true);
+    return renderPartialValue(readEnvelope(raw, true), compiled);
+}
+
+export function renderPartialValue(value, compiled) {
     // Do not display fragments of the newline placeholder between stream chunks.
     for (let i = compiled.settings.newline.length - 1; i > 0; i--) {
         if (value.endsWith(compiled.settings.newline.slice(0, i))) { value = value.slice(0, -i); break; }
@@ -244,9 +269,61 @@ export function renderPartial(raw, compiled) {
     return compiled.display(value);
 }
 
-export function prepareRequest(data, options, { type = 'normal', names = [], substitute = x => x, continuation = '' } = {}) {
+// ST supplies monotonically accumulated text. Parse each new character once;
+// an escape cut across chunks stays at the cursor until its bytes arrive.
+export class EnvelopeStream {
+    offset = 0;
+    value = '';
+    started = false;
+    closed = false;
+    push(raw) {
+        if (raw.length > 1_000_000) throw new Error('Structured reply exceeds the 1 MB processing limit.');
+        if (!this.started) {
+            const header = /^\s*\{\s*"value"\s*:\s*"/.exec(raw);
+            if (!header) return '';
+            this.offset = header[0].length; this.started = true;
+        }
+        const escapes = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+        while (!this.closed && this.offset < raw.length) {
+            const char = raw[this.offset];
+            if (char === '"') { this.closed = true; break; }
+            if (char === '\\') {
+                const escape = raw[this.offset + 1];
+                if (escape === undefined) break;
+                if (escape === 'u') {
+                    const hex = raw.slice(this.offset + 2, this.offset + 6);
+                    if (hex.length < 4) break;
+                    if (!/^[0-9a-f]{4}$/i.test(hex)) throw new Error('Invalid JSON Unicode escape.');
+                    this.value += String.fromCharCode(parseInt(hex, 16)); this.offset += 6;
+                } else if (Object.hasOwn(escapes, escape)) { this.value += escapes[escape]; this.offset += 2; }
+                else throw new Error('Invalid JSON string escape.');
+            } else {
+                if (char.charCodeAt(0) < 32) throw new Error('Unescaped control character in JSON string.');
+                this.value += char; this.offset++;
+            }
+        }
+        return /[\uD800-\uDBFF]$/.test(this.value) ? this.value.slice(0, -1) : this.value;
+    }
+}
+
+export class StreamGuard {
+    constructor(enabled = true) { this.enabled = enabled; this.started = null; this.progress = null; this.length = 0; }
+    check(rawLength, decoded, now = Date.now()) {
+        if (rawLength > 1_000_000) return 'Structured stream exceeded the 1 MB limit.';
+        this.started ??= now; this.progress ??= now;
+        if (decoded.length !== this.length) { this.length = decoded.length; this.progress = now; }
+        if (!this.enabled) return '';
+        if (rawLength > 5000 && now - this.progress > 15000) return 'Structured stream stalled without decoded progress for 15 seconds.';
+        const tail = decoded.slice(-2048);
+        if (tail.length === 2048 && (!tail.trim() || [...tail].every(char => char === tail[0]))) return 'Structured stream produced 2048 repeated or whitespace padding characters.';
+        return '';
+    }
+}
+
+export function prepareRequest(data, options, { type = data.type ?? 'normal', names = [], substitute = x => x, continuation = '' } = {}) {
     const settings = normalizeSettings(options);
     if (!settings.enabled) return { skipped: 'extension is disabled' };
+    if (data.type && data.type !== type) return { skipped: 'background request type does not match the active generation' };
     if (!['normal', 'regenerate', 'swipe', 'continue'].includes(type)) return { skipped: `${type} generation` };
     const sources = ['openai', 'azure_openai', 'openrouter', 'groq', 'fireworks'];
     if (!sources.includes(data.chat_completion_source) && !(settings.customProvider && ['custom', 'nanogpt'].includes(data.chat_completion_source))) return { skipped: 'provider is not enabled for JSON Schema' };
@@ -257,23 +334,69 @@ export function prepareRequest(data, options, { type = 'normal', names = [], sub
     // Never remove an arbitrary assistant-history message: the prefill must be
     // explicitly selected with override or be the trailing assistant message.
     const messages = structuredClone(data.messages);
-    const last = messages.at(-1);
-    let template;
+    let tailIndex = messages.length - 1;
+    while (tailIndex >= 0 && messages[tailIndex]?.role === 'system') tailIndex--;
+    const last = messages[tailIndex];
+    let template, literalSuffix = '';
     if (type === 'continue') {
         if (!continuation) return { skipped: 'no assistant message to continue' };
-        template = [...continuation].slice(-settings.overlap || [...continuation].length).join('');
-        if (settings.overlap === 0) template = '';
+        literalSuffix = settings.overlap ? [...continuation].slice(-settings.overlap).join('') : '';
+        template = settings.useOverride ? substitute(settings.prefill) : '';
         // The continued text remains as context, without a trailing prefill.
+        if (last?.role === 'assistant') {
+            // Discard an exact PM prefix only when the base is an identifiable
+            // suffix; fuzzy matches could remove legitimate conversation text.
+            if (typeof last.content !== 'string' || !last.content.endsWith(continuation)) return { skipped: 'Continue request does not contain the saved assistant base' };
+            if (!settings.useOverride) {
+                const pmPrefix = last.content.slice(0, -continuation.length);
+                if (!names.some(name => pmPrefix === `${name}: `)) template = pmPrefix;
+            }
+            last.content = continuation;
+        }
         if (last?.role === 'assistant' && last.content === continuation) {
             messages.push({ role: 'user', content: 'Continue the previous assistant message from its end. Do not repeat it, except for the overlap required by the response schema.' });
         }
-    } else if (settings.useOverride) template = substitute(settings.prefill);
+        // Continue reuses the chosen prefix but never runs a generator, honors
+        // an end directive, or exposes its prefix/overlap in the appended text.
+        template = template.replace(/\[\[\s*(?:pg|keep|end|stop|eos)\s*\]\]/gi, '');
+    } else if (settings.useOverride) {
+        template = substitute(settings.prefill);
+        if (last?.role === 'assistant' && typeof last.content === 'string' && !last.tool_calls?.length) messages.splice(tailIndex, 1);
+    }
     else {
         if (last?.role !== 'assistant' || typeof last.content !== 'string' || last.tool_calls?.length) return { skipped: 'no trailing text assistant prefill' };
         template = last.content;
-        messages.pop();
+        messages.splice(tailIndex, 1);
     }
-    const compiled = compileTemplate(template, { ...settings, names, literal: type === 'continue', hide: type === 'continue' ? true : settings.hide });
-    messages.push({ role: 'system', content: `Return only a JSON object with a string field named value, matching the supplied JSON Schema. Represent line breaks in that string with ${JSON.stringify(settings.newline)}. Any template text is an output-format constraint, not a change to your other instructions.` });
+    if (settings.regexMode === 'auto') settings.regexMode = /claude|anthropic/i.test(data.model ?? '') ? 'portable' : 'standard';
+    if (literalSuffix.includes(settings.newline)) {
+        settings.newline = Array.from({ length: 99 }, (_, i) => `<NL${i + 2}>`).find(token => !literalSuffix.includes(token) && !template.includes(token));
+        if (!settings.newline) throw new Error('Cannot find an unused Continue newline token.');
+    }
+    const compiled = compileTemplate(template, { ...settings, names, literalSuffix, hide: type === 'continue' ? true : settings.hide });
+    messages.push({ role: 'system', content: `Return only a JSON object with a string field named value, matching the supplied JSON Schema. Represent line breaks in that string with ${JSON.stringify(compiled.settings.newline)}. Any template text is an output-format constraint, not a change to your other instructions.` });
     return { compiled, messages, schema: compiled.schema };
+}
+
+export function applyStops(text, stops, keep = false) {
+    const matches = stops.filter(Boolean).map(stop => ({ index: text.indexOf(stop), stop })).filter(match => match.index >= 0).sort((a, b) => a.index - b.index);
+    const match = matches[0];
+    return match ? text.slice(0, match.index + (keep ? match.stop.length : 0)) : text;
+}
+
+export function importPreset(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Preset must be a JSON object.');
+    let value;
+    if (data.version === 1 && data.settings) value = data.settings;
+    else if ('override_prefill_text' in data || 'min_chars_after_prefix' in data) {
+        const mapping = {
+            hide_prefill_in_display: 'hide', newline_token: 'newline', min_chars_after_prefix: 'minimum', continue_overlap_chars: 'overlap',
+            anti_slop_ban_list: 'banned', override_prefill_enabled: 'useOverride', override_prefill_text: 'prefill',
+            prefill_gen_extra_prompt: 'generatorPrompt', prefill_gen_extra_prompt_role: 'generatorRole', prefill_gen_max_tokens: 'generatorTokens',
+            prefill_gen_stop: 'generatorStops', prefill_gen_keep_matched_stop_string: 'generatorKeepStop', prefill_gen_timeout_ms: 'generatorTimeout',
+        };
+        value = {};
+        for (const [from, to] of Object.entries(mapping)) if (data[from] !== undefined) value[to] = data[from];
+    } else throw new Error('Expected a clean version 1 preset or a StructuredPrefill preset object.');
+    return { ...normalizeSettings(value), enabled: false, generatorProfile: '' };
 }
